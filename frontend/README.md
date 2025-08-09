@@ -45,6 +45,7 @@ A modern React + TypeScript frontend for the restaurant booking chat interface, 
    VITE_API_BASE_URL=http://localhost:8547
    VITE_BEARER_TOKEN=your_bearer_token_here
    VITE_RESTAURANT_NAME=TheHungryUnicorn
+   VITE_BOOKING_SYSTEM_NAME=UnicornReservations
    ```
 
 3. **Start development server**

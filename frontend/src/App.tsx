@@ -6,8 +6,8 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>🦄 TheHungryUnicorn</h1>
-        <p>Restaurant Booking Assistant</p>
+        <h1>🍽️ TableBooker</h1>
+        <p>Smart Restaurant Reservation Platform</p>
       </header>
       
       <main className="main-content">

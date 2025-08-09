@@ -1,8 +1,15 @@
 import axios from 'axios'
-import { Booking, BookingRequest, AvailabilityRequest, ApiResponse, AvailabilitySlot } from '../types/booking'
+import type { Booking, BookingRequest, AvailabilityRequest, AvailabilitySlot } from '../types/booking'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8547'
-const BEARER_TOKEN = import.meta.env.VITE_BEARER_TOKEN || 'your_bearer_token_here'
+interface ApiResponse<T> {
+  success: boolean
+  data?: T
+  error?: string
+  message?: string
+}
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
+const BEARER_TOKEN = import.meta.env.VITE_BEARER_TOKEN || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1bmlxdWVfbmFtZSI6ImFwcGVsbGErYXBpQHJlc2RpYXJ5LmNvbSIsIm5iZiI6MTc1NDQzMDgwNSwiZXhwIjoxNzU0NTE3MjA1LCJpYXQiOjE3NTQ0MzA4MDUsImlzcyI6IlNlbGYiLCJhdWQiOiJodHRwczovL2FwaS5yZXNkaWFyeS5jb20ifQ.g3yLsufdk8Fn2094SB3J3XW-KdBc0DY9a2Jiu_56ud8'
 const RESTAURANT_NAME = 'TheHungryUnicorn'
 
 // Create axios instance with default config
@@ -46,21 +53,63 @@ apiClient.interceptors.response.use(
 )
 
 export const bookingApi = {
-  // Check availability
-  async checkAvailability(request: AvailabilityRequest): Promise<ApiResponse<AvailabilitySlot[]>> {
+  // Get available restaurants
+  async getRestaurants(): Promise<ApiResponse<{id: number, name: string, microsite_name: string}[]>> {
     try {
-      const response = await apiClient.get('/availability', {
-        params: {
-          restaurant: RESTAURANT_NAME,
-          date: request.date,
-          time: request.time,
-          party: request.party,
-        }
-      })
+      console.log('🏢 Getting list of available restaurants')
+      
+      // Note: This would require a new API endpoint in the mock server
+      // For now, we'll return the known restaurant(s)
+      const restaurants = [
+        { id: 1, name: 'TheHungryUnicorn', microsite_name: 'TheHungryUnicorn' }
+      ]
+      
+      console.log('✅ Restaurants retrieved:', restaurants)
       
       return {
         success: true,
-        data: response.data,
+        data: restaurants
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get restaurants'
+      }
+    }
+  },
+  // Check availability
+  async checkAvailability(restaurantName: string, request: AvailabilityRequest): Promise<ApiResponse<AvailabilitySlot[]>> {
+    try {
+      const requestData = {
+        VisitDate: request.date,
+        PartySize: request.party.toString(),
+        ChannelCode: 'ONLINE'
+      }
+
+      console.log('🔍 Checking availability with request:', requestData)
+
+      const response = await apiClient.post(
+        `/api/ConsumerApi/v1/Restaurant/${RESTAURANT_NAME}/AvailabilitySearch`,
+        requestData
+      )
+      
+      console.log('✅ Availability check successful:', {
+        status: response.status,
+        data: response.data
+      })
+      
+      // Transform the API response to match our interface
+      const availabilitySlots: AvailabilitySlot[] = response.data.available_slots?.map((slot: any) => ({
+        time: slot.time,
+        available: slot.available,
+        table: slot.max_party_size ? `Max ${slot.max_party_size} people` : undefined
+      })) || []
+      
+      console.log('🎯 Transformed availability slots:', availabilitySlots)
+      
+      return {
+        success: true,
+        data: availabilitySlots,
       }
     } catch (error) {
       return {
@@ -73,20 +122,56 @@ export const bookingApi = {
   // Create booking
   async createBooking(request: BookingRequest): Promise<ApiResponse<Booking>> {
     try {
-      const response = await apiClient.post('/booking', {
-        restaurant: RESTAURANT_NAME,
-        date: request.date,
-        time: request.time,
-        party: request.party,
+      const requestData: any = {
+        VisitDate: request.date,
+        VisitTime: request.time,
+        PartySize: request.party.toString(),
+        ChannelCode: 'ONLINE'
+      }
+      
+      if (request.name) {
+        const nameParts = request.name.split(' ')
+        requestData['Customer[FirstName]'] = nameParts[0]
+        if (nameParts.length > 1) {
+          requestData['Customer[Surname]'] = nameParts.slice(1).join(' ')
+        }
+      }
+      if (request.email) requestData['Customer[Email]'] = request.email
+      if (request.phone) requestData['Customer[Mobile]'] = request.phone
+      if (request.specialRequests) requestData['SpecialRequests'] = request.specialRequests
+
+      console.log('📝 Creating booking with request:', requestData)
+
+      const response = await apiClient.post(
+        `/api/ConsumerApi/v1/Restaurant/${RESTAURANT_NAME}/BookingWithStripeToken`,
+        requestData
+      )
+      
+      console.log('✅ Booking creation successful:', {
+        status: response.status,
+        data: response.data
+      })
+      
+      // Transform API response to our Booking interface
+      const booking: Booking = {
+        id: response.data.booking_reference,
+        date: response.data.visit_date,
+        time: response.data.visit_time,
+        party: response.data.party_size,
         name: request.name,
         email: request.email,
         phone: request.phone,
+        status: response.data.status,
+        reference: response.data.booking_reference,
         specialRequests: request.specialRequests,
-      })
+        createdAt: new Date(response.data.created_at)
+      }
+      
+      console.log('🎯 Transformed booking data:', booking)
       
       return {
         success: true,
-        data: response.data,
+        data: booking,
         message: 'Booking created successfully',
       }
     } catch (error) {
@@ -98,13 +183,41 @@ export const bookingApi = {
   },
 
   // Get booking by ID
-  async getBooking(bookingId: string): Promise<ApiResponse<Booking>> {
+  async getBooking(bookingReference: string): Promise<ApiResponse<Booking>> {
     try {
-      const response = await apiClient.get(`/booking/${bookingId}`)
+      console.log('🔍 Getting booking with reference:', bookingReference)
+
+      const response = await apiClient.get(
+        `/api/ConsumerApi/v1/Restaurant/${RESTAURANT_NAME}/Booking/${bookingReference}`
+      )
+      
+      console.log('✅ Get booking successful:', {
+        status: response.status,
+        data: response.data
+      })
+      
+      // Transform API response to our Booking interface
+      const booking: Booking = {
+        id: response.data.booking_reference,
+        date: response.data.visit_date,
+        time: response.data.visit_time,
+        party: response.data.party_size,
+        name: response.data.customer?.first_name ? 
+          `${response.data.customer.first_name} ${response.data.customer.surname || ''}`.trim() : '',
+        email: response.data.customer?.email || '',
+        phone: response.data.customer?.mobile || '',
+        status: response.data.status,
+        reference: response.data.booking_reference,
+        specialRequests: response.data.special_requests,
+        createdAt: new Date(response.data.created_at),
+        updatedAt: response.data.updated_at ? new Date(response.data.updated_at) : undefined
+      }
+      
+      console.log('🎯 Transformed booking data:', booking)
       
       return {
         success: true,
-        data: response.data,
+        data: booking,
       }
     } catch (error) {
       return {
@@ -115,11 +228,25 @@ export const bookingApi = {
   },
 
   // Update booking
-  async updateBooking(bookingId: string, updates: Partial<BookingRequest>): Promise<ApiResponse<Booking>> {
+  async updateBooking(restaurantName: string, bookingReference: string, updates: Partial<BookingRequest>): Promise<ApiResponse<Booking>> {
     try {
-      const response = await apiClient.put(`/booking/${bookingId}`, {
-        restaurant: RESTAURANT_NAME,
-        ...updates,
+      const requestData: any = {}
+      
+      if (updates.date) requestData.VisitDate = updates.date
+      if (updates.time) requestData.VisitTime = updates.time
+      if (updates.party) requestData.PartySize = updates.party.toString()
+      if (updates.specialRequests) requestData.SpecialRequests = updates.specialRequests
+
+      console.log('✏️ Updating booking with reference:', bookingReference, 'updates:', requestData)
+
+      const response = await apiClient.patch(
+        `/api/ConsumerApi/v1/Restaurant/${restaurantName}/Booking/${bookingReference}`,
+        requestData
+      )
+      
+      console.log('✅ Booking update successful:', {
+        status: response.status,
+        data: response.data
       })
       
       return {
@@ -136,9 +263,25 @@ export const bookingApi = {
   },
 
   // Cancel booking
-  async cancelBooking(bookingId: string): Promise<ApiResponse<void>> {
+  async cancelBooking(restaurantName: string, bookingReference: string, cancellationReasonId: number = 1): Promise<ApiResponse<void>> {
     try {
-      await apiClient.delete(`/booking/${bookingId}`)
+      const requestData = {
+        micrositeName: restaurantName,
+        bookingReference: bookingReference,
+        cancellationReasonId: cancellationReasonId.toString()
+      }
+
+      console.log('❌ Cancelling booking with reference:', bookingReference, 'request:', requestData)
+
+      const response = await apiClient.post(
+        `/api/ConsumerApi/v1/Restaurant/${restaurantName}/Booking/${bookingReference}/Cancel`,
+        requestData
+      )
+      
+      console.log('✅ Booking cancellation successful:', {
+        status: response.status,
+        data: response.data
+      })
       
       return {
         success: true,

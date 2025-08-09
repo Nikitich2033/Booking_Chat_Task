@@ -37,6 +37,7 @@ This project implements a chat-based booking system that integrates with a resta
 ### API Integration
 - **Base URL**: `http://localhost:8547`
 - **Restaurant**: TheHungryUnicorn
+- **Booking System**: UnicornReservations
 - **Authentication**: Bearer token
 - **Content Type**: `application/x-www-form-urlencoded`
 
@@ -204,7 +205,7 @@ python -m pytest --cov=src tests/
 ## Limitations and Future Improvements
 
 ### Current Limitations
-- Single restaurant support (TheHungryUnicorn)
+- Single restaurant support (TheHungryUnicorn) through UnicornReservations booking system
 - Basic natural language understanding
 - Limited conversation memory
 - No user authentication system

@@ -10,8 +10,8 @@ const Header = () => {
               <span className="text-white font-bold text-xl">🦄</span>
             </div>
             <div>
-              <h1 className="text-xl font-bold text-gray-900">TheHungryUnicorn</h1>
-              <p className="text-sm text-gray-600">Restaurant Booking Assistant</p>
+              <h1 className="text-xl font-bold text-gray-900">TableBooker</h1>
+              <p className="text-sm text-gray-600">Multi-Restaurant Booking Platform</p>
             </div>
           </div>
           
