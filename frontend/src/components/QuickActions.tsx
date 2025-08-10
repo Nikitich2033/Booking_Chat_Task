@@ -1,8 +1,11 @@
+import { useState } from 'react'
+
 interface QuickActionsProps {
   onActionClick: (action: string) => void
 }
 
 const QuickActions = ({ onActionClick }: QuickActionsProps) => {
+  const [isVisible, setIsVisible] = useState(true)
   const quickActions = [
     {
       emoji: "📅",
@@ -28,20 +31,32 @@ const QuickActions = ({ onActionClick }: QuickActionsProps) => {
 
   return (
     <div className="quick-actions">
-      <div className="quick-actions-label">Quick actions:</div>
-      <div className="quick-actions-buttons">
-        {quickActions.map((action, index) => (
-          <button
-            key={index}
-            onClick={() => onActionClick(action.action)}
-            className="quick-action-btn"
-            title={action.action}
-          >
-            <span className="quick-action-emoji">{action.emoji}</span>
-            <span className="quick-action-label">{action.label}</span>
-          </button>
-        ))}
+      <div className="quick-actions-header">
+        <div className="quick-actions-label">Quick actions:</div>
+        <button
+          onClick={() => setIsVisible(!isVisible)}
+          className="quick-actions-toggle"
+          title={isVisible ? "Hide quick actions" : "Show quick actions"}
+        >
+          {isVisible ? "🙈" : "👀"} {isVisible ? "Hide" : "Show"}
+        </button>
       </div>
+      
+      {isVisible && (
+        <div className="quick-actions-buttons">
+          {quickActions.map((action, index) => (
+            <button
+              key={index}
+              onClick={() => onActionClick(action.action)}
+              className="quick-action-btn"
+              title={action.action}
+            >
+              <span className="quick-action-emoji">{action.emoji}</span>
+              <span className="quick-action-label">{action.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

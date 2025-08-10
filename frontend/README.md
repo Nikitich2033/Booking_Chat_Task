@@ -42,10 +42,14 @@ A modern React + TypeScript frontend for the restaurant booking chat interface, 
    
    Edit `.env` and configure:
    ```env
+   # AI Agent Backend API
+   VITE_AGENT_API_URL=http://localhost:8000
+   
+   # Legacy Booking API (for fallback)
    VITE_API_BASE_URL=http://localhost:8547
    VITE_BEARER_TOKEN=your_bearer_token_here
    VITE_RESTAURANT_NAME=TheHungryUnicorn
-   VITE_BOOKING_SYSTEM_NAME=UnicornReservations
+   VITE_BOOKING_SYSTEM_NAME=TableBooker
    ```
 
 3. **Start development server**

@@ -48,18 +48,21 @@ This project implements a chat-based booking system that integrates with a resta
 ## Project Structure
 
 ```
-Booking_Chat_Task/
-├── README.md                          # This file
-├── requirements.txt                   # Python dependencies
-├── src/                              # Main application code
-│   ├── agent/                        # AI agent implementation
-│   ├── api/                          # API client and integration
-│   ├── chat/                         # Chat interface implementation
-│   └── utils/                        # Utility functions
-├── tests/                            # Test suite
-├── docs/                             # Additional documentation
-├── Restaurant-Booking-Mock-API-Server/ # Provided mock API server
-└── examples/                         # Usage examples and demos
+restaurant-booking-chat-agent/
+├── README.md                          # Project overview
+├── backend/                          # Ollama-powered AI backend
+│   ├── main.py                       # FastAPI server with Ollama
+│   ├── requirements.txt              # Backend dependencies
+│   └── README.md                     # Backend documentation
+├── frontend/                         # React web interface
+│   ├── src/                          # React components
+│   ├── package.json                  # Frontend dependencies
+│   └── README.md                     # Frontend documentation
+├── install_ollama_model.bat          # Ollama setup script
+├── start_ollama_system.bat           # Quick start script
+├── OLLAMA_SETUP.md                   # Ollama installation guide
+├── QUICK_SETUP.md                    # Quick setup instructions
+└── test_ollama.py                    # Ollama connectivity test
 ```
 
 ## Getting Started

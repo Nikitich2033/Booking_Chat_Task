@@ -15,8 +15,35 @@ interface RestaurantContext {
   availableRestaurants: {id: number, name: string, microsite_name: string}[]
 }
 
+interface AgentChatRequest {
+  message: string
+  session_id?: string
+  user_id?: string
+  context?: Record<string, any>
+}
+
+interface AgentChatResponse {
+  message: string
+  session_id: string
+  agent_responses?: Array<{
+    agent_type: string
+    message: string
+    actions_taken: string[]
+    next_agent?: string
+    booking_data?: any
+    requires_user_input: boolean
+    confidence_score: number
+  }>
+  conversation_state?: Record<string, any>
+  suggestions?: string[]
+  booking_data?: any
+  availability_data?: any
+}
+
 export class ChatService {
   private conversationHistory: ChatMessage[] = []
+  private sessionId: string | null = null
+  private agentApiUrl: string = import.meta.env.VITE_AGENT_API_URL || 'http://localhost:8000'
   private restaurantContext: RestaurantContext = {
     selectedRestaurant: null,
     availableRestaurants: []
@@ -51,57 +78,136 @@ export class ChatService {
     }
     this.conversationHistory.push(userMsg)
 
-    // Process the message and generate response
-    const botResponse = await this.generateBotResponse(userMessage)
-    this.conversationHistory.push(botResponse)
+    try {
+      // Call the AI agent backend
+      const agentResponse = await this.callAgentAPI(userMessage)
+      
+      // Create bot response from agent
+      const botResponse: ChatMessage = {
+        id: (Date.now() + 1).toString(),
+        type: 'bot',
+        content: agentResponse.message,
+        timestamp: new Date(),
+        bookingData: this.extractBookingData(agentResponse),
+        availabilityData: this.extractAvailabilityData(agentResponse)
+      }
+      
+      this.conversationHistory.push(botResponse)
+      
+      // Update session ID if provided
+      if (agentResponse.session_id) {
+        this.sessionId = agentResponse.session_id
+      }
+      
+      // Update restaurant context from agent response
+      if (agentResponse.conversation_state?.current_restaurant) {
+        this.restaurantContext.selectedRestaurant = agentResponse.conversation_state.current_restaurant
+      } else if (!this.restaurantContext.selectedRestaurant) {
+        // Default to TheHungryUnicorn for simple backend
+        this.restaurantContext.selectedRestaurant = 'TheHungryUnicorn'
+      }
 
-    return botResponse
+      return botResponse
+
+    } catch (error) {
+      console.error('AI Agent API Error:', error)
+      
+      // Fallback to local processing if agent API fails
+      const fallbackResponse = await this.generateFallbackResponse(userMessage)
+      this.conversationHistory.push(fallbackResponse)
+      return fallbackResponse
+    }
   }
 
-  private async generateBotResponse(userInput: string): Promise<ChatMessage> {
+  private async callAgentAPI(message: string): Promise<AgentChatResponse> {
+    console.log('🤖 Calling AI Agent API:', { message, sessionId: this.sessionId })
+    
+    const request: AgentChatRequest = {
+      message,
+      session_id: this.sessionId || undefined,
+      context: {
+        current_restaurant: this.restaurantContext.selectedRestaurant
+      }
+    }
+
+    const response = await fetch(`${this.agentApiUrl}/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request)
+    })
+
+    if (!response.ok) {
+      throw new Error(`Agent API error: ${response.status} ${response.statusText}`)
+    }
+
+    const result: AgentChatResponse = await response.json()
+    
+    console.log('✅ Agent API Response:', result)
+    
+    return result
+  }
+
+  private extractBookingData(agentResponse: AgentChatResponse): any {
+    // Handle direct booking data from Ollama backend
+    if (agentResponse.booking_data) {
+      return agentResponse.booking_data
+    }
+    
+    // Handle both full AI response and simple response formats (legacy)
+    if (agentResponse.agent_responses && Array.isArray(agentResponse.agent_responses)) {
+      // Full AI agent response format
+      for (const response of agentResponse.agent_responses) {
+        if (response.booking_data) {
+          return response.booking_data
+        }
+      }
+    }
+    // Simple response format - no booking data extraction needed
+    return null
+  }
+
+  private extractAvailabilityData(agentResponse: AgentChatResponse): any {
+    // Handle direct availability data from Ollama backend
+    if (agentResponse.availability_data) {
+      return agentResponse.availability_data
+    }
+    
+    // Handle both full AI response and simple response formats (legacy)
+    if (agentResponse.agent_responses && Array.isArray(agentResponse.agent_responses)) {
+      // Full AI agent response format
+      for (const response of agentResponse.agent_responses) {
+        if (response.agent_type === 'availability' && response.confidence_score > 0.7) {
+          return { available: true, message: response.message }
+        }
+      }
+    }
+    // Simple response format - check if message contains availability info
+    if (agentResponse.message.toLowerCase().includes('availability')) {
+      return { available: true, message: agentResponse.message }
+    }
+    return null
+  }
+
+  private async generateFallbackResponse(userInput: string): Promise<ChatMessage> {
+    console.warn('🔄 Using fallback response - AI Agent API unavailable')
+    
     const input = userInput.toLowerCase()
     let response = ""
-    let bookingData = null
-    let availabilityData = null
 
-    try {
-      // Check if user is selecting a restaurant first
-      if (this.containsIntent(input, ['restaurant', 'choose', 'select']) || !this.restaurantContext.selectedRestaurant) {
-        const result = this.handleRestaurantSelection(input)
-        response = result.response
-      }
-      // Intent detection based on keywords
-      else if (this.containsIntent(input, ['availability', 'available', 'check', 'free', 'open'])) {
-        const { response: resp, availabilityData: avail } = await this.handleAvailabilityQuery(input)
-        response = resp
-        availabilityData = avail
-      } 
-      else if (this.containsIntent(input, ['book', 'reserve', 'table', 'reservation'])) {
-        const { response: resp, bookingData: booking } = await this.handleBookingRequest(input)
-        response = resp
-        bookingData = booking
-      }
-      else if (this.containsIntent(input, ['cancel', 'modify', 'change', 'update'])) {
-        response = await this.handleBookingModification(input)
-      }
-      else if (this.containsIntent(input, ['find', 'lookup', 'reference', 'booking id'])) {
-        response = await this.handleBookingLookup(input)
-      }
-      else if (this.containsIntent(input, ['menu', 'food', 'cuisine', 'dishes'])) {
-        response = "Our menu features modern European cuisine with seasonal ingredients. We offer:\n\n🍽️ Contemporary European dishes\n🥗 Vegetarian and vegan options\n🌾 Gluten-free alternatives\n🍷 Curated wine selection\n\nWould you like me to help you make a reservation to experience our culinary offerings?"
-      }
-      else if (this.containsIntent(input, ['hours', 'open', 'close', 'timing'])) {
-        response = "TheHungryUnicorn is open:\n\n🕔 Tuesday - Sunday: 5:00 PM - 11:00 PM\n❌ Closed Mondays\n\nWe accept reservations for dinner service. Would you like to check availability for a specific date?"
-      }
-      else if (this.containsIntent(input, ['hello', 'hi', 'hey', 'good morning', 'good evening'])) {
-        response = "Hello! Welcome to TableBooker! 🍽️✨\n\nI'm your personal dining assistant, ready to help you with:\n\n• Checking table availability\n• Making new reservations  \n• Managing existing bookings\n• Answering questions about restaurants\n\nWhat can I help you with today?"
-      }
-      else {
-        response = this.getDefaultResponse()
-      }
-    } catch (error) {
-      console.error('Error processing message:', error)
-      response = "I apologize, but I'm experiencing some technical difficulties. Please try again in a moment, or feel free to call us directly for assistance."
+    // Simple fallback responses when AI is unavailable
+    if (this.containsIntent(input, ['hello', 'hi', 'hey'])) {
+      response = "Hello! I'm having trouble connecting to our AI system right now, but I'm still here to help with basic questions about TableBooker. What can I do for you?"
+    }
+    else if (this.containsIntent(input, ['book', 'reserve', 'table'])) {
+      response = "I'd love to help you make a reservation! Unfortunately, our AI booking system is temporarily unavailable. Please try again in a moment or contact us directly."
+    }
+    else if (this.containsIntent(input, ['availability', 'available'])) {
+      response = "I'd be happy to check availability for you, but our AI system is currently offline. Please try again shortly."
+    }
+    else {
+      response = "I'm sorry, but our AI assistant is temporarily unavailable. Please try again in a few moments. In the meantime, you can contact us directly for immediate assistance."
     }
 
     return {
@@ -109,8 +215,6 @@ export class ChatService {
       type: 'bot',
       content: response,
       timestamp: new Date(),
-      bookingData,
-      availabilityData,
     }
   }
 

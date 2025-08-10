@@ -175,16 +175,43 @@
   background: #fafafa;
 }
 
+.quick-actions-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
 .quick-actions-label {
   font-size: 0.9rem;
   color: #666;
-  margin-bottom: 0.5rem;
+}
+
+.quick-actions-toggle {
+  background: #007bff;
+  color: white;
+  border: none;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.quick-actions-toggle:hover {
+  background: #0056b3;
+  transform: translateY(-1px);
 }
 
 .quick-actions-buttons {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+  transition: all 0.3s ease;
+  overflow: hidden;
 }
 
 .quick-action-btn {
