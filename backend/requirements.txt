@@ -3,8 +3,16 @@ fastapi>=0.104.0
 uvicorn>=0.24.0
 pydantic>=2.5.0
 
-# Local LLM Support - Ollama Only
+# LangGraph Agent Framework
+langgraph>=0.0.40
+langchain>=0.1.0
+
+# Local LLM Support - Ollama Fallback (Updated)
+langchain-ollama>=0.1.0
 httpx>=0.25.0
+
+# Database
+sqlalchemy>=1.4.0
 
 # Utilities
 python-dotenv>=1.0.0

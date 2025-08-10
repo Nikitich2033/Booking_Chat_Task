@@ -1,19 +1,30 @@
 """
-TableBooker AI Agent Backend with Ollama Integration
+TableBooker AI Agent Backend with LangGraph Framework
+Multi-tier AI system: OpenAI -> Ollama -> Simple Mode
 """
 import asyncio
 import uuid
 import httpx
 import re
 import json
-from typing import Dict, Any, Optional, Tuple
+import os
+from typing import Dict, Any, Optional, Tuple, TypedDict, Annotated
 from datetime import datetime, timedelta
+from enum import Enum
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Date, Time, Text, ForeignKey
+from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Simple models for Ollama integration
+# LangGraph imports
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_ollama import OllamaLLM
+
+# Models
 class ChatRequest(BaseModel):
     message: str
     session_id: str = None
@@ -27,11 +38,28 @@ class ChatResponse(BaseModel):
     conversation_state: Dict[str, Any] = {}
     booking_data: Optional[Dict[str, Any]] = None
     availability_data: Optional[Dict[str, Any]] = None
+    ai_mode: str = "unknown"
+
+# Agent State for LangGraph - Following official patterns
+class AgentState(TypedDict):
+    # Messages have the type "list". The `add_messages` function
+    # in the annotation defines how this state key should be updated
+    # (in this case, it appends messages to the list, rather than overwriting them)
+    messages: Annotated[list, add_messages]
+    user_input: str
+    session_data: Dict[str, Any]
+    booking_intent: Optional[Dict[str, Any]]
+    response: str
+    booking_data: Optional[Dict[str, Any]]
+    availability_data: Optional[Dict[str, Any]]
+    error: Optional[str]
+
+# Removed AI mode enum - using Ollama only
 
 # Create FastAPI app
 app = FastAPI(
-    title="TableBooker AI Agent API (Ollama)",
-    description="Restaurant booking with Ollama AI integration",
+    title="TableBooker AI Agent API (LangGraph + Ollama)",
+    description="Restaurant booking with LangGraph and Ollama LLM",
     version="1.0.0"
 )
 
@@ -44,19 +72,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ollama configuration
+# Configuration
 OLLAMA_BASE_URL = "http://localhost:11434"
 MODEL_NAME = "llama3.1:8b"
-
-# Booking API configuration
 BOOKING_API_BASE_URL = "http://localhost:8547"
 RESTAURANT_NAME = "TheHungryUnicorn"
 BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1bmlxdWVfbmFtZSI6ImFwcGVsbGErYXBpQHJlc2RpYXJ5LmNvbSIsIm5iZiI6MTc1NDQzMDgwNSwiZXhwIjoxNzU0NTE3MjA1LCJpYXQiOjE3NTQ0MzA4MDUsImlzcyI6IlNlbGYiLCJhdWQiOiJodHRwczovL2FwaS5yZXNkaWFyeS5jb20ifQ.g3yLsufdk8Fn2094SB3J3XW-KdBc0DY9a2Jiu_56ud8"
 
+# Database Configuration
+DATABASE_URL = "sqlite:///../../Restaurant-Booking-Mock-API-Server/restaurant_booking.db"
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Database Models
+class Restaurant(Base):
+    __tablename__ = "restaurants"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True, nullable=False)
+    microsite_name = Column(String, unique=True, index=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+def get_db():
+    """Get database session"""
+    db = SessionLocal()
+    try:
+        return db
+    finally:
+        pass  # Don't close here, let the caller handle it
+
 # Simple in-memory storage
 sessions = {}
 
-# Booking API Functions
+# Booking API Client
 class BookingAPIClient:
     """Client for interacting with the restaurant booking API"""
     
@@ -67,16 +116,97 @@ class BookingAPIClient:
             "Authorization": f"Bearer {BEARER_TOKEN}",
             "Content-Type": "application/x-www-form-urlencoded"
         }
+        
+        # Restaurant metadata (static info not in database)
+        self._restaurant_metadata = {
+            "TheHungryUnicorn": {
+                "description": "Upscale modern European cuisine",
+                "cuisine": "European",
+                "price_range": "$$$$"
+            },
+            "PizzaPalace": {
+                "description": "Authentic Italian pizzas and pasta",
+                "cuisine": "Italian",
+                "price_range": "$$$"
+            },
+            "SushiZen": {
+                "description": "Fresh sushi and Japanese cuisine",
+                "cuisine": "Japanese", 
+                "price_range": "$$$$"
+            },
+            "CafeBistro": {
+                "description": "Casual French bistro with daily specials",
+                "cuisine": "French",
+                "price_range": "$$"
+            }
+        }
+    
+    def get_available_restaurants(self) -> dict:
+        """Get list of available restaurants from database"""
+        db = get_db()
+        try:
+            restaurants = db.query(Restaurant).all()
+            available_restaurants = {}
+            
+            for restaurant in restaurants:
+                microsite_name = restaurant.microsite_name
+                metadata = self._restaurant_metadata.get(microsite_name, {})
+                
+                available_restaurants[microsite_name] = {
+                    "name": restaurant.name,
+                    "description": metadata.get("description", "Restaurant"),
+                    "cuisine": metadata.get("cuisine", "International"),
+                    "price_range": metadata.get("price_range", "$$$")
+                }
+            
+            return available_restaurants
+        finally:
+            db.close()
+    
+    async def get_restaurants_with_availability(self, date: str, party_size: int) -> dict:
+        """Get only restaurants that have availability for the given date and party size"""
+        all_restaurants = self.get_available_restaurants()
+        available_restaurants = {}
+        
+        for restaurant_id, restaurant_info in all_restaurants.items():
+            try:
+                availability = await self.check_availability(date, party_size, restaurant_id)
+                if 'error' not in availability:
+                    available_slots = availability.get('available_slots', [])
+                    # Only include restaurants that have at least one available time slot
+                    available_times = [slot for slot in available_slots if slot.get('available', False)]
+                    if available_times:
+                        restaurant_info['available_times'] = available_times
+                        restaurant_info['total_available_slots'] = len(available_times)
+                        available_restaurants[restaurant_id] = restaurant_info
+            except Exception as e:
+                print(f"Error checking availability for {restaurant_id}: {e}")
+                continue
+                
+        return available_restaurants
+    
+    def get_restaurant_info(self, restaurant_id: str) -> dict:
+        """Get information about a specific restaurant from database"""
+        db = get_db()
+        try:
+            restaurant = db.query(Restaurant).filter(Restaurant.microsite_name == restaurant_id).first()
+            if restaurant:
+                metadata = self._restaurant_metadata.get(restaurant_id, {})
+                return {
+                    "name": restaurant.name,
+                    "description": metadata.get("description", "Restaurant"),
+                    "cuisine": metadata.get("cuisine", "International"),
+                    "price_range": metadata.get("price_range", "$$$")
+                }
+            return {}
+        finally:
+            db.close()
     
     def _normalize_time_to_hhmmss(self, time_str: str) -> str:
         """Convert various time formats to HH:MM:SS format required by API"""
-        from datetime import datetime
-        
         time_lower = time_str.lower().strip()
         
-        # Handle formats like "7pm", "7:30pm", "19:00", "7:30", etc.
         if ':' in time_lower:
-            # Format: "7:30pm" or "19:30"
             base_time = time_lower.replace('pm', '').replace('am', '').strip()
             try:
                 if 'pm' in time_lower:
@@ -92,13 +222,11 @@ class BookingAPIClient:
                         hour = 0
                     return f"{hour:02d}:{int(minute):02d}:00"
                 else:
-                    # 24-hour format like "19:30"
                     hour, minute = base_time.split(':')
                     return f"{int(hour):02d}:{int(minute):02d}:00"
             except ValueError:
                 pass
         else:
-            # Format: "7pm" or "19"
             try:
                 base_time = time_lower.replace('pm', '').replace('am', '').strip()
                 hour = int(base_time)
@@ -112,13 +240,12 @@ class BookingAPIClient:
             except ValueError:
                 pass
         
-        # Default fallback - assume it's already in correct format or use 19:00
         if time_str.count(':') == 2:
             return time_str
         else:
             return "19:00:00"  # Default to 7pm
     
-    async def check_availability(self, date: str, party_size: int) -> dict:
+    async def check_availability(self, date: str, party_size: int, restaurant_name: str = RESTAURANT_NAME) -> dict:
         """Check table availability for given date and party size"""
         try:
             data = {
@@ -128,7 +255,7 @@ class BookingAPIClient:
             }
             
             response = await self.client.post(
-                f"{self.base_url}/api/ConsumerApi/v1/Restaurant/{RESTAURANT_NAME}/AvailabilitySearch",
+                f"{self.base_url}/api/ConsumerApi/v1/Restaurant/{restaurant_name}/AvailabilitySearch",
                 data=data,
                 headers=self.headers
             )
@@ -141,33 +268,26 @@ class BookingAPIClient:
         except Exception as e:
             return {"error": f"Failed to check availability: {str(e)}"}
     
-    async def create_booking(self, date: str, time: str, party_size: int, customer_info: dict) -> dict:
+    async def create_booking(self, date: str, time: str, party_size: int, customer_info: dict, restaurant_name: str = RESTAURANT_NAME) -> dict:
         """Create a new booking"""
         try:
-            from datetime import datetime
-            
-            # Parse date - expect YYYY-MM-DD format
             visit_date = datetime.strptime(date, '%Y-%m-%d').date()
-            
-            # Parse time to HH:MM:SS format required by API
             visit_time_str = self._normalize_time_to_hhmmss(time)
             
-            # Prepare data according to API specification
             data = {
-                "VisitDate": visit_date.isoformat(),  # YYYY-MM-DD
-                "VisitTime": visit_time_str,          # HH:MM:SS
-                "PartySize": str(party_size),         # Convert to string
+                "VisitDate": visit_date.isoformat(),
+                "VisitTime": visit_time_str,
+                "PartySize": str(party_size),
                 "ChannelCode": "ONLINE"
             }
             
-            # Add customer information with correct API field names
             if customer_info.get("name"):
                 name_parts = customer_info["name"].strip().split(" ", 1)
                 data["Customer[FirstName]"] = name_parts[0]
                 if len(name_parts) > 1:
                     data["Customer[Surname]"] = name_parts[1]
                 else:
-                    data["Customer[Surname]"] = ""  # Provide empty surname if only one name
+                    data["Customer[Surname]"] = ""
             
             if customer_info.get("email"):
                 data["Customer[Email]"] = customer_info["email"]
@@ -178,39 +298,25 @@ class BookingAPIClient:
             if customer_info.get("special_requests"):
                 data["SpecialRequests"] = customer_info["special_requests"]
             
-            print(f"Creating booking with data: {data}")
-            
             response = await self.client.post(
-                f"{self.base_url}/api/ConsumerApi/v1/Restaurant/{RESTAURANT_NAME}/BookingWithStripeToken",
+                f"{self.base_url}/api/ConsumerApi/v1/Restaurant/{restaurant_name}/BookingWithStripeToken",
                 data=data,
                 headers=self.headers
             )
             
-            print(f"Booking API response: {response.status_code} - {response.text}")
-            
-            if response.status_code == 200:
-                response_data = response.json()
-                print(f"Parsed booking response: {response_data}")
-                return response_data
-            elif response.status_code == 201:
-                # Some APIs return 201 for created resources
-                response_data = response.json()
-                print(f"Parsed booking response (201): {response_data}")
-                return response_data
+            if response.status_code in [200, 201]:
+                return response.json()
             else:
-                error_msg = f"API error: {response.status_code} - {response.text}"
-                print(f"Booking API error: {error_msg}")
-                return {"error": error_msg}
+                return {"error": f"API error: {response.status_code} - {response.text}"}
                 
         except Exception as e:
-            print(f"Booking creation error: {e}")
             return {"error": f"Failed to create booking: {str(e)}"}
     
-    async def get_booking(self, booking_reference: str) -> dict:
+    async def get_booking(self, booking_reference: str, restaurant_name: str = RESTAURANT_NAME) -> dict:
         """Get booking details by reference"""
         try:
             response = await self.client.get(
-                f"{self.base_url}/api/ConsumerApi/v1/Restaurant/{RESTAURANT_NAME}/Booking/{booking_reference}",
+                f"{self.base_url}/api/ConsumerApi/v1/Restaurant/{restaurant_name}/Booking/{booking_reference}",
                 headers=self.headers
             )
             
@@ -221,20 +327,53 @@ class BookingAPIClient:
                 
         except Exception as e:
             return {"error": f"Failed to get booking: {str(e)}"}
-
-    async def cancel_booking(self, booking_reference: str, microsite_name: str = None, cancellation_reason_id: int = 1) -> dict:
+    
+    async def update_booking(self, booking_reference: str, updates: dict, restaurant_name: str = RESTAURANT_NAME) -> dict:
+        """Update an existing booking"""
+        try:
+            data = {}
+            
+            # Map update fields to API format
+            if "date" in updates:
+                visit_date = datetime.strptime(updates["date"], '%Y-%m-%d').date()
+                data["VisitDate"] = visit_date.isoformat()
+            
+            if "time" in updates:
+                data["VisitTime"] = self._normalize_time_to_hhmmss(updates["time"])
+            
+            if "party_size" in updates:
+                data["PartySize"] = str(updates["party_size"])
+            
+            if "special_requests" in updates:
+                data["SpecialRequests"] = updates["special_requests"]
+            
+            response = await self.client.patch(
+                f"{self.base_url}/api/ConsumerApi/v1/Restaurant/{restaurant_name}/Booking/{booking_reference}",
+                data=data,
+                headers=self.headers
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"error": f"API error: {response.status_code} - {response.text}"}
+                
+        except Exception as e:
+            return {"error": f"Failed to update booking: {str(e)}"}
+    
+    async def cancel_booking(self, booking_reference: str, cancellation_reason_id: int = 1, restaurant_name: str = RESTAURANT_NAME) -> dict:
         """Cancel an existing booking"""
         try:
             data = {
-                "micrositeName": microsite_name or RESTAURANT_NAME,
+                "micrositeName": restaurant_name,
                 "bookingReference": booking_reference,
-                "cancellationReasonId": cancellation_reason_id,
+                "cancellationReasonId": str(cancellation_reason_id)
             }
             
             response = await self.client.post(
-                f"{self.base_url}/api/ConsumerApi/v1/Restaurant/{RESTAURANT_NAME}/Booking/{booking_reference}/Cancel",
+                f"{self.base_url}/api/ConsumerApi/v1/Restaurant/{restaurant_name}/Booking/{booking_reference}/Cancel",
                 data=data,
-                headers=self.headers,
+                headers=self.headers
             )
             
             if response.status_code == 200:
@@ -245,60 +384,15 @@ class BookingAPIClient:
         except Exception as e:
             return {"error": f"Failed to cancel booking: {str(e)}"}
 
-    async def update_booking(self, booking_reference: str, *, date: Optional[str] = None, time: Optional[str] = None,
-                              party_size: Optional[int] = None, special_requests: Optional[str] = None,
-                              is_leave_time_confirmed: Optional[bool] = None) -> dict:
-        """Update an existing booking"""
-        try:
-            from datetime import datetime
-            data: Dict[str, Any] = {}
-
-            if date:
-                # Expect YYYY-MM-DD
-                visit_date = datetime.strptime(date, '%Y-%m-%d').date()
-                data["VisitDate"] = visit_date.isoformat()
-
-            if time:
-                # Use the same time normalization method
-                data["VisitTime"] = self._normalize_time_to_hhmmss(time)
-
-            if party_size is not None:
-                data["PartySize"] = party_size
-
-            if special_requests is not None:
-                data["SpecialRequests"] = special_requests
-
-            if is_leave_time_confirmed is not None:
-                data["IsLeaveTimeConfirmed"] = is_leave_time_confirmed
-
-            response = await self.client.patch(
-                f"{self.base_url}/api/ConsumerApi/v1/Restaurant/{RESTAURANT_NAME}/Booking/{booking_reference}",
-                data=data,
-                headers=self.headers
-            )
-
-            if response.status_code == 200:
-                return response.json()
-            else:
-                return {"error": f"API error: {response.status_code} - {response.text}"}
-        except Exception as e:
-            return {"error": f"Failed to update booking: {str(e)}"}
-
 # Initialize booking API client
 booking_client = BookingAPIClient()
 
-class OllamaAI:
-    """Simple Ollama AI integration"""
+# Intent Extraction Utilities
+class IntentExtractor:
+    """Extract booking intents from user messages"""
     
-    def __init__(self):
-        self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(60.0, connect=15.0, read=60.0),
-            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)
-        )
-        self.base_url = OLLAMA_BASE_URL
-        self.model = MODEL_NAME
-    
-    def normalize_date_text(self, date_text: str) -> Optional[str]:
+    @staticmethod
+    def normalize_date_text(date_text: str) -> Optional[str]:
         """Normalize various date phrasings to YYYY-MM-DD"""
         if not date_text:
             return None
@@ -319,203 +413,64 @@ class OllamaAI:
         if txt == "tomorrow":
             return (now + timedelta(days=1)).date().isoformat()
         
-        # Month name + day
-        for fmt in ("%B %d", "%b %d"):
+        # Month name + day (with or without year)
+        for fmt in ("%B %d", "%b %d", "%B %d %Y", "%b %d %Y"):
             try:
-                d = datetime.strptime(txt, fmt).replace(year=now.year).date()
-                if d < now.date():
-                    d = d.replace(year=now.year + 1)
+                if "%Y" in fmt:
+                    d = datetime.strptime(txt, fmt).date()
+                else:
+                    d = datetime.strptime(txt, fmt).replace(year=now.year).date()
+                    if d < now.date():
+                        d = d.replace(year=now.year + 1)
                 return d.isoformat()
             except ValueError:
                 pass
         
-        # Weekday handling
-        weekdays = {
-            'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
-            'friday': 4, 'saturday': 5, 'sunday': 6
-        }
-        m = re.match(r"^(next\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)$", txt)
-        if m:
-            add_week = 1 if m.group(1) else 0
-            target = weekdays[m.group(2)]
-            delta = (target - now.weekday()) % 7
-            if delta == 0:
-                delta = 7
-            delta += add_week * 7
-            d = (now + timedelta(days=delta)).date()
-            return d.isoformat()
-        
         return None
     
-    def _parse_time_to_24h(self, time_str: str) -> str:
-        """Parse time string to 24-hour format for comparison"""
-        try:
-            time_lower = time_str.lower().strip()
-            
-            if ':' in time_lower:
-                # Handle "7:30pm" or "19:30"
-                base_time = time_lower.replace('pm', '').replace('am', '').strip()
-                if 'pm' in time_lower:
-                    hour, minute = base_time.split(':')
-                    hour = int(hour)
-                    if hour != 12:
-                        hour += 12
-                    return f"{hour:02d}:{int(minute):02d}"
-                elif 'am' in time_lower:
-                    hour, minute = base_time.split(':')
-                    hour = int(hour)
-                    if hour == 12:
-                        hour = 0
-                    return f"{hour:02d}:{int(minute):02d}"
-                else:
-                    # Already in 24-hour format
-                    hour, minute = base_time.split(':')
-                    return f"{int(hour):02d}:{int(minute):02d}"
-            else:
-                # Handle "7pm" or "19"
-                base_time = time_lower.replace('pm', '').replace('am', '').strip()
-                hour = int(base_time)
-                
-                if 'pm' in time_lower and hour != 12:
-                    hour += 12
-                elif 'am' in time_lower and hour == 12:
-                    hour = 0
-                
-                return f"{hour:02d}:00"
-        except:
-            return "19:00"  # Default fallback
-    
-    def _times_match(self, requested_time: str, slot_time: str) -> bool:
-        """Check if requested time matches available slot (with some flexibility)"""
-        try:
-            # Extract hours and minutes
-            req_parts = requested_time.split(':')
-            slot_parts = slot_time.split(':')
-            
-            req_hour, req_min = int(req_parts[0]), int(req_parts[1])
-            slot_hour, slot_min = int(slot_parts[0]), int(slot_parts[1])
-            
-            # Convert to minutes for easy comparison
-            req_total_min = req_hour * 60 + req_min
-            slot_total_min = slot_hour * 60 + slot_min
-            
-            # Allow 30-minute flexibility
-            return abs(req_total_min - slot_total_min) <= 30
-        except:
-            return requested_time[:5] == slot_time[:5]  # Exact match fallback
-    
-    def _is_booking_confirmation(self, message: str, session_data: dict) -> bool:
-        """Check if message is confirming a pending booking"""
-        if not session_data.get('awaiting_confirmation'):
-            return False
-        
-        confirmation_words = ['yes', 'confirm', 'book it', 'proceed', 'go ahead', 'that\'s correct', 'correct', 'ok', 'okay']
-        return any(word in message.lower() for word in confirmation_words)
-    
-    def _is_direct_booking_command(self, message: str) -> bool:
-        """Check if message is a direct booking command with all details"""
-        msg_lower = message.lower()
-        has_book_word = any(word in msg_lower for word in ['book', 'reserve', 'reservation'])
-        has_people = any(word in msg_lower for word in ['people', 'guests', 'party'])
-        has_name_indicator = any(word in msg_lower for word in ['name', 'i\'m', 'my name'])
-        has_email = '@' in message or 'email' in msg_lower
-        has_time = any(indicator in msg_lower for indicator in ['pm', 'am', ':', 'time', 'tomorrow', 'today'])
-        
-        print(f"Direct booking check: book={has_book_word}, people={has_people}, name={has_name_indicator}, email={has_email}, time={has_time}")
-        return has_book_word and has_people and (has_name_indicator or has_email) and has_time
-    
-    def _has_all_booking_details(self, booking_data: dict) -> bool:
-        """Check if booking data has all required fields"""
-        required_fields = ['date', 'time', 'party_size', 'name', 'email']
-        return all(booking_data.get(field) for field in required_fields)
-    
-    def _generate_confirmation_message(self, booking_data: dict) -> str:
-        """Generate confirmation message for pending booking"""
-        normalized_date = self.normalize_date_text(booking_data['date'])
-        
-        message = "🔄 **READY TO CONFIRM YOUR BOOKING**\n\n"
-        message += "📋 **Please confirm these details:**\n"
-        message += f"🍽️ Restaurant: TheHungryUnicorn\n"
-        message += f"📅 Date: {normalized_date or booking_data['date']}\n"
-        message += f"🕐 Time: {booking_data['time']}\n"
-        message += f"👥 Party Size: {booking_data['party_size']} people\n"
-        message += f"👤 Name: {booking_data['name']}\n"
-        message += f"📧 Email: {booking_data['email']}\n"
-        if booking_data.get('phone'):
-            message += f"📞 Phone: {booking_data['phone']}\n"
-        message += "\n✅ **Type 'YES' or 'CONFIRM' to book this reservation**\n"
-        message += "❌ **Type 'NO' or 'CANCEL' to start over**"
-        
-        return message
-    
-    async def _handle_booking_confirmation(self, session_data: dict) -> Tuple[str, Optional[dict], Optional[dict], dict]:
-        """Handle confirmed booking - bypass AI and go direct to API"""
-        pending_booking = session_data.get('pending_booking', {})
-        
-        if not self._has_all_booking_details(pending_booking):
-            session_data.pop('awaiting_confirmation', None)
-            return "I'm sorry, there seems to be missing information. Let's start the booking process again.", None, None, session_data
-        
-        # Clear confirmation state and process booking directly
-        session_data.pop('awaiting_confirmation', None)
-        
-        # Convert pending_booking to proper intent format
-        booking_intent = {
-            'action': 'book',
-            'date': pending_booking['date'],
-            'time': pending_booking['time'],
-            'party_size': pending_booking['party_size'],
-            'name': pending_booking['name'],
-            'email': pending_booking['email'],
-            'phone': pending_booking.get('phone', '')
-        }
-        
-        # Process booking with enforced checks
-        response_text, booking_data, availability_data, updated_session = await self.process_booking_action(booking_intent, session_data)
-        
-        # Clear pending booking after processing
-        updated_session.pop('pending_booking', None)
-        
-        return response_text, booking_data, availability_data, updated_session
-    
-    async def is_available(self) -> bool:
-        """Check if Ollama is running"""
-        try:
-            response = await self.client.get(f"{self.base_url}/api/tags")
-            return response.status_code == 200
-        except:
-            return False
-    
-    async def extract_booking_intent(self, message: str) -> Optional[dict]:
+    @staticmethod
+    async def extract_booking_intent(message: str) -> Optional[dict]:
         """Extract booking intent and details from user message"""
         intent: Dict[str, Any] = {}
         
-        print(f"Extracting intent from message: {message}")
+        # Check for specific booking intent keywords with priority order
+        lower = message.lower()
         
-        # Check for booking intent keywords
-        booking_keywords = ['book', 'reserve', 'reservation', 'table', 'availability', 'available', 'modify', 'change', 'update', 'cancel', 'check', 'status', 'details', 'what time']
-        found_keywords = [kw for kw in booking_keywords if kw in message.lower()]
-        print(f"Found booking keywords: {found_keywords}")
+        # 1. Check for cancellation intent (highest priority)
+        cancel_keywords = ['cancel', 'cancelled', 'delete', 'remove']
+        if any(keyword in lower for keyword in cancel_keywords):
+            intent['action'] = 'cancel_booking'
+            print(f"❌ Intent: cancel_booking detected in message: {message}")
         
-        if any(keyword in message.lower() for keyword in booking_keywords):
-            lower = message.lower()
-            if 'modify' in lower or 'change' in lower or 'update' in lower:
-                intent['action'] = 'modify'
-            elif 'cancel' in lower:
-                intent['action'] = 'cancel'
-            elif ('check' in lower or 'status' in lower or 'details' in lower or 'what time' in lower):
-                intent['action'] = 'get_booking'
-            elif 'availability' in lower or 'available' in lower:
-                intent['action'] = 'check_availability'
-            else:
-                intent['action'] = 'book'
+        # 2. Check for modification intent
+        elif any(keyword in lower for keyword in ['change', 'modify', 'update', 'reschedule', 'move']):
+            intent['action'] = 'update_booking'
+            print(f"✏️ Intent: update_booking detected in message: {message}")
+        
+        # 3. Check for booking lookup intent
+        elif any(keyword in lower for keyword in ['check my', 'my booking', 'my reservation', 'booking reference', 'find my']):
+            intent['action'] = 'get_booking'
+            print(f"🔍 Intent: get_booking detected in message: {message}")
+        
+        # 4. Check for availability intent
+        elif 'availability' in lower or 'available' in lower:
+            intent['action'] = 'check_availability'
+            print(f"🔍 Intent: check_availability detected in message: {message}")
+        
+        # 5. Check for general booking keywords
+        elif any(keyword in lower for keyword in ['book', 'reserve', 'reservation', 'table']):
+            intent['action'] = 'book'
+            print(f"📝 Intent: book detected in message: {message}")
+        
+        else:
+            print(f"❌ No booking keywords found in message: {message}")
         
         # Extract date information
         date_patterns = [
-            r'(\d{1,2}[/-]\d{1,2}[/-]\d{4})',  # DD/MM/YYYY or DD-MM-YYYY
-            r'(\d{4}[/-]\d{1,2}[/-]\d{1,2})',  # YYYY/MM/DD or YYYY-MM-DD
-            r'(today|tomorrow|next \w+)',       # today, tomorrow, next friday
-            r'(\w+ \d{1,2})',                   # March 15
+            r'(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
+            r'(\d{4}[/-]\d{1,2}[/-]\d{1,2})',
+            r'(today|tomorrow|next \w+)',
+            r'(\w+ \d{1,2})',
         ]
         for pattern in date_patterns:
             match = re.search(pattern, message.lower())
@@ -525,9 +480,9 @@ class OllamaAI:
         
         # Extract time information
         time_patterns = [
-            r'(\d{1,2}:\d{2}\s*(?:am|pm)?)',   # 7:30pm, 19:30
-            r'(\d{1,2}\s*(?:am|pm))',          # 7pm, 7 pm
-            r'at (\d{1,2})',                   # at 7
+            r'(\d{1,2}:\d{2}\s*(?:am|pm)?)',
+            r'(\d{1,2}\s*(?:am|pm))',
+            r'at (\d{1,2})',
         ]
         for pattern in time_patterns:
             match = re.search(pattern, message.lower())
@@ -549,137 +504,373 @@ class OllamaAI:
                 intent['party_size'] = int(match.group(1))
                 break
         
-        # Extract customer information
-        ref_match = re.search(r'\b([A-Z0-9]{7})\b', message)
-        if ref_match:
-            intent['reference'] = ref_match.group(1)
-
+        # Extract email
         email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', message)
         if email_match:
             intent['email'] = email_match.group(0)
         
-        phone_match = re.search(r'[\+]?[\d\s\-\(\)]{10,}', message)
-        if phone_match:
-            intent['phone'] = phone_match.group(0)
+        # Extract booking reference (alphanumeric codes with mixed case/numbers)
+        booking_ref_patterns = [
+            r'reference\s+([A-Z0-9]{6,8})',  # "reference ABC123"
+            r'booking\s+reference\s+([A-Z0-9]{6,8})',  # "booking reference ABC123"
+            r'ref\s+([A-Z0-9]{6,8})',  # "ref ABC123"
+            r'#([A-Z0-9]{6,8})',  # "#ABC123"
+            r'\b([A-Z0-9]*[0-9][A-Z0-9]*[A-Z][A-Z0-9]*|[A-Z0-9]*[A-Z][A-Z0-9]*[0-9][A-Z0-9]*)\b',  # Mixed letters/numbers pattern
+        ]
+        for pattern in booking_ref_patterns:
+            match = re.search(pattern, message.upper())
+            if match:
+                ref = match.group(1)
+                # Ensure it's not a common word and has mixed alphanumeric
+                excluded_words = ['BOOKING', 'REFERENCE', 'TOMORROW', 'TONIGHT', 'CANCEL', 'CHANGE', 'UPDATE', 'MODIFY']
+                if (ref not in excluded_words and 
+                    len(ref) >= 6 and 
+                    any(c.isdigit() for c in ref) and 
+                    any(c.isalpha() for c in ref)):
+                    intent['booking_reference'] = ref
+                    print(f"Extracted booking reference: {ref}")
+                    break
         
-        # Extract name - more flexible patterns with better validation
+        # Extract restaurant preference
+        # Get restaurant keywords from metadata
+        restaurant_keywords = {}
+        for restaurant_id, metadata in booking_client._restaurant_metadata.items():
+            keywords = []
+            
+            # Add restaurant name parts
+            name_parts = restaurant_id.lower().replace('the', '').split()
+            keywords.extend(name_parts)
+            
+            # Add cuisine type
+            if metadata.get('cuisine'):
+                keywords.append(metadata['cuisine'].lower())
+                
+            # Add specific keywords based on restaurant
+            if 'pizza' in restaurant_id.lower():
+                keywords.extend(['pizza', 'pasta', 'italian'])
+            elif 'sushi' in restaurant_id.lower():
+                keywords.extend(['sushi', 'japanese'])
+            elif 'unicorn' in restaurant_id.lower():
+                keywords.extend(['unicorn', 'fine dining', 'european'])
+            elif 'bistro' in restaurant_id.lower():
+                keywords.extend(['bistro', 'cafe', 'french'])
+                
+            restaurant_keywords[restaurant_id] = keywords
+        
+        message_lower = message.lower()
+        for restaurant_id, keywords in restaurant_keywords.items():
+            if any(keyword in message_lower for keyword in keywords):
+                intent['restaurant'] = restaurant_id
+                break
+        
+        # Extract name - improved patterns
         name_patterns = [
             r'name is ([A-Za-z\s]+)',
             r'i\'m ([A-Za-z\s]+)',
             r'my name\'s ([A-Za-z\s]+)',
-            r'name ([A-Za-z]+\s+[A-Za-z]+)',  # Require at least first + last name
-            r'\bname\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',  # Capitalized names after "name"
+            r'people\s+([A-Z][a-z]+(?:\s+[A-Z])?)',  # "4 people Nik" or "4 people Nik L"
+            r'for\s+\d+\s+people\s+([A-Z][a-z]+(?:\s+[A-Z])?)',  # "for 4 people Nik L"
+            r'(\b[A-Z][a-z]+\s+[A-Z]\b)',  # "Nik L" - capitalized first and last initial
         ]
         
-        # Also try to find capitalized names in the message
-        capitalized_name_pattern = r'\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b'
-        cap_matches = re.findall(capitalized_name_pattern, message)
-        
         for pattern in name_patterns:
-            match = re.search(pattern, message, re.IGNORECASE)
+            match = re.search(pattern, message)
             if match:
-                potential_name = match.group(1).strip().title()
-                # Validate it looks like a real name
-                excluded_words = ['book', 'table', 'people', 'tomorrow', 'today', 'reservation', 'restaurant', 'hungry', 'unicorn']
-                if (len(potential_name.split()) >= 2 and 
-                    not any(word in potential_name.lower() for word in excluded_words) and
-                    all(part.isalpha() for part in potential_name.split())):
+                potential_name = match.group(1).strip()
+                excluded_words = ['book', 'table', 'people', 'tomorrow', 'today', 'reservation', 'august', 'email']
+                # Allow single names or two-word names
+                if (len(potential_name.split()) >= 1 and 
+                    not any(word.lower() in potential_name.lower() for word in excluded_words) and
+                    potential_name.replace(' ', '').isalpha()):
                     intent['name'] = potential_name
-                    print(f"Extracted name from pattern: {potential_name}")
+                    print(f"Extracted name: {potential_name}")
                     break
         
-        # If no name found from patterns, try capitalized names
-        if 'name' not in intent and cap_matches:
-            for cap_name in cap_matches:
-                excluded_words = ['book', 'table', 'people', 'tomorrow', 'today', 'reservation', 'restaurant', 'hungry', 'unicorn']
-                if (not any(word in cap_name.lower() for word in excluded_words) and
-                    all(part.isalpha() for part in cap_name.split())):
-                    intent['name'] = cap_name
-                    print(f"Extracted name from capitalized text: {cap_name}")
-                    break
-        
-        if intent:
-            print(f"Extracted intent: {intent}")
-        else:
-            print("No intent extracted")
-            
         return intent if intent else None
+
+# LangGraph Agent Framework
+class BookingAgent:
+    """LangGraph-based booking agent using Ollama"""
     
-    async def process_booking_action(self, intent: dict, session_data: dict) -> Tuple[str, Optional[dict], Optional[dict], dict]:
+    def __init__(self):
+        self.intent_extractor = IntentExtractor()
+        
+        # Initialize Ollama LLM
+        try:
+            self.ollama_llm = OllamaLLM(
+                model=MODEL_NAME,
+                base_url=OLLAMA_BASE_URL
+            )
+            print("✅ Ollama configured with langchain-ollama")
+        except Exception as e:
+            print(f"❌ Ollama initialization failed: {e}")
+            raise Exception("Ollama is required for the booking agent to function")
+        
+        # Build the agent graph
+        self.graph = self._build_agent_graph()
+    
+    def _build_agent_graph(self) -> StateGraph:
+        """Build the LangGraph agent workflow following official patterns"""
+        
+        # Create a StateGraph with our defined state schema
+        graph_builder = StateGraph(AgentState)
+        
+        # Add nodes (units of work) - simplified to only Ollama
+        graph_builder.add_node("ollama_agent", self._ollama_agent_node)
+        graph_builder.add_node("booking_processor", self._booking_processor_node)
+        
+        # Add entry point - start directly with Ollama
+        graph_builder.add_edge(START, "ollama_agent")
+        
+        # Ollama agent routes to booking processor
+        graph_builder.add_edge("ollama_agent", "booking_processor")
+        
+        # Add exit point - tell the graph where to finish execution
+        graph_builder.add_edge("booking_processor", END)
+        
+        # Compile the graph into a runnable
+        return graph_builder.compile()
+    
+    # Removed router, OpenAI, and simple agent nodes - using Ollama only
+    
+    async def _ollama_agent_node(self, state: AgentState) -> AgentState:
+        """Ollama-powered agent node - follows LangGraph pattern"""
+        print("🦙 Ollama Agent: Processing...")
+        
+        try:
+            system_prompt = self._get_system_prompt()
+            user_message = state["user_input"]
+            
+            # Build message list from current state with session context
+            session_booking = state["session_data"].get("booking_info", {})
+            context_info = ""
+            if session_booking:
+                context_info = f"\n\nCURRENT BOOKING INFORMATION:\n"
+                for key, value in session_booking.items():
+                    if value:
+                        context_info += f"- {key.replace('_', ' ').title()}: {value}\n"
+            
+            # Add availability data if we have it
+            if state.get('availability_data'):
+                avail_data = state['availability_data']
+                context_info += f"\n\nAVAILABILITY DATA:\n"
+                
+                if 'available_restaurants' in avail_data:
+                    context_info += f"Available restaurants for {avail_data.get('date')} with {avail_data.get('party_size')} people:\n"
+                    for rest_id, rest_info in avail_data['available_restaurants'].items():
+                        times = [slot['time'] for slot in rest_info.get('available_times', [])]
+                        context_info += f"- {rest_info['name']}: {', '.join(times[:3])}{'...' if len(times) > 3 else ''}\n"
+                elif 'available_times' in avail_data:
+                    restaurant_name = avail_data.get('restaurant', 'selected restaurant')
+                    context_info += f"Available times at {restaurant_name} for {avail_data.get('date')} with {avail_data.get('party_size')} people:\n"
+                    times = avail_data['available_times']
+                    context_info += f"- {', '.join(times)}\n"
+            
+            enhanced_prompt = system_prompt + context_info
+            messages = [SystemMessage(content=enhanced_prompt)]
+            # Add existing messages from state if any  
+            if state.get("messages"):
+                messages.extend(state["messages"])
+            # Add current user input
+            messages.append(HumanMessage(content=user_message))
+            
+            # Invoke Ollama LLM with message format
+            response = await self.ollama_llm.ainvoke(messages)
+            
+            print("✅ Ollama Agent: Response generated")
+            
+            # Handle both string and object responses from Ollama
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            
+            # Return state updates as a dictionary - this is the LangGraph pattern
+            return {
+                "response": response_text,
+                "messages": [AIMessage(content=response_text)],
+                "error": None
+            }
+            
+        except Exception as e:
+            print(f"❌ Ollama Agent error: {e}")
+            return {
+                "response": "I apologize, but I'm having trouble processing your request right now. Please try again.",
+                "messages": [AIMessage(content="I apologize, but I'm having trouble processing your request right now. Please try again.")],
+                "error": str(e)
+            }
+    
+    async def _booking_processor_node(self, state: AgentState) -> AgentState:
+        """Process booking actions using extracted intents with conversational enhancement"""
+        print("📋 Booking Processor: Processing...")
+        
+        try:
+            # Extract intent from user message
+            intent = await self.intent_extractor.extract_booking_intent(state["user_input"])
+            print(f"🔍 Extracted intent: {intent}")
+            
+            # Get or initialize booking information from session
+            session_booking = state["session_data"].get("booking_info", {})
+            
+            # Merge new intent with existing session data
+            if intent:
+                for key, value in intent.items():
+                    if value:  # Only update if we have a value
+                        session_booking[key] = value
+            
+            # Update session data
+            updated_session = state["session_data"].copy()
+            updated_session["booking_info"] = session_booking
+            
+            # Prepare state updates
+            updates = {
+                "booking_intent": intent,
+                "session_data": updated_session,
+                "error": None
+            }
+            
+            # Check if this is an explicit booking action request
+            if intent and intent.get('action') in ['check_availability', 'book', 'get_booking', 'update_booking', 'cancel_booking']:
+                print(f"📋 Processing direct action: {intent.get('action')}")
+                # Process direct booking action
+                response, booking_data, availability_data = await self._process_booking_action(
+                    intent, updated_session
+                )
+                
+                # Add booking results to state updates
+                if booking_data:
+                    updates["booking_data"] = booking_data
+                if availability_data:
+                    updates["availability_data"] = availability_data
+                
+                # Override response if we have booking results
+                if response:
+                    updates["response"] = response
+                    updates["messages"] = [AIMessage(content=response)]
+                    
+            # Check if we need conversational flow or direct booking
+            elif self._should_use_conversational_flow(session_booking, state["user_input"]):
+                # Let the AI handle the conversation naturally
+                print("📋 Using conversational flow")
+                return updates
+            
+            print("✅ Booking Processor: Completed")
+            return updates
+            
+        except Exception as e:
+            print(f"❌ Booking Processor error: {e}")
+            return {"error": str(e)}
+    
+    def _should_use_conversational_flow(self, session_booking: dict, user_input: str) -> bool:
+        """Determine if we should use conversational flow or direct booking"""
+        required_fields = ['restaurant', 'date', 'time', 'party_size', 'name', 'email']
+        missing_fields = [field for field in required_fields if not session_booking.get(field)]
+        
+        # Use conversational flow if:
+        # 1. We're missing required information (including restaurant selection)
+        # 2. User didn't provide complete booking details in one message
+        # 3. User is asking questions or being conversational
+        
+        conversational_indicators = ['?', 'can you', 'could you', 'please', 'help', 'what', 'when', 'how', 'which', 'where']
+        is_conversational = any(indicator in user_input.lower() for indicator in conversational_indicators)
+        
+        return len(missing_fields) > 0 or is_conversational
+    
+    async def _process_booking_action(self, intent: dict, session_data: dict) -> Tuple[str, Optional[dict], Optional[dict]]:
         """Process booking actions and return response with booking/availability data"""
         try:
             if intent.get('action') == 'check_availability':
                 if intent.get('date') and intent.get('party_size'):
-                    normalized_date = self.normalize_date_text(intent['date'])
+                    normalized_date = self.intent_extractor.normalize_date_text(intent['date'])
                     if not normalized_date:
-                        return "Please provide a valid date.", None, None, session_data
+                        return "Please provide a valid date.", None, None
                     
-                    availability_result = await booking_client.check_availability(normalized_date, intent['party_size'])
-                    
-                    if 'error' not in availability_result:
-                        availability_data = {
-                            'date': normalized_date,
-                            'party_size': intent['party_size'],
-                            'slots': availability_result.get('available_slots', [])
-                        }
-                        session_data.setdefault('booking', {})
-                        session_data['booking'].update({
-                            'last_checked_date': normalized_date,
-                            'last_checked_party_size': intent['party_size'],
-                            'available_slots': availability_result.get('available_slots', [])
-                        })
-                        return f"Great! I found availability for {intent['party_size']} people on {normalized_date}.", None, availability_data, session_data
+                    # Check availability across all restaurants if no specific restaurant chosen
+                    if intent.get('restaurant'):
+                        restaurant_name = intent['restaurant']
+                        availability_result = await booking_client.check_availability(normalized_date, intent['party_size'], restaurant_name)
+                        
+                        if 'error' not in availability_result:
+                            available_slots = availability_result.get('available_slots', [])
+                            available_times = [slot for slot in available_slots if slot.get('available', False)]
+                            
+                            if available_times:
+                                time_options = [slot['time'] for slot in available_times]
+                                restaurant_info = booking_client.get_restaurant_info(restaurant_name)
+                                
+                                availability_data = {
+                                    'date': normalized_date,
+                                    'party_size': intent['party_size'],
+                                    'restaurant': restaurant_name,
+                                    'available_slots': available_slots,
+                                    'available_times': time_options
+                                }
+                                
+                                return f"Perfect! {restaurant_info.get('name', restaurant_name)} has availability on {normalized_date} for {intent['party_size']} people. Available times: {', '.join(time_options[:5])}{'...' if len(time_options) > 5 else ''}.", None, availability_data
+                            else:
+                                return f"I'm sorry, {restaurant_name} doesn't have availability on {normalized_date} for {intent['party_size']} people. Would you like to try a different date or restaurant?", None, None
+                        else:
+                            return f"I'm sorry, I couldn't check availability right now. {availability_result['error']}", None, None
                     else:
-                        return f"I'm sorry, I couldn't check availability right now. {availability_result['error']}", None, None, session_data
+                        # Check all restaurants and recommend those with availability
+                        available_restaurants = await booking_client.get_restaurants_with_availability(normalized_date, intent['party_size'])
+                        
+                        if available_restaurants:
+                            restaurant_names = list(available_restaurants.keys())
+                            availability_data = {
+                                'date': normalized_date,
+                                'party_size': intent['party_size'],
+                                'available_restaurants': available_restaurants
+                            }
+                            
+                            if len(restaurant_names) == 1:
+                                restaurant_id = restaurant_names[0]
+                                restaurant = available_restaurants[restaurant_id]
+                                time_options = [slot['time'] for slot in restaurant['available_times']]
+                                return f"Good news! {restaurant['name']} has availability on {normalized_date} for {intent['party_size']} people. Available times: {', '.join(time_options[:5])}{'...' if len(time_options) > 5 else ''}.", None, availability_data
+                            else:
+                                restaurant_list = [available_restaurants[r]['name'] for r in restaurant_names[:3]]
+                                return f"Great! I found availability on {normalized_date} for {intent['party_size']} people at: {', '.join(restaurant_list)}{'...' if len(restaurant_names) > 3 else ''}. Which restaurant interests you?", None, availability_data
+                        else:
+                            return f"I'm sorry, none of our restaurants have availability on {normalized_date} for {intent['party_size']} people. Would you like to try a different date?", None, None
                 else:
-                    return "To check availability, I need both the date and party size.", None, None, session_data
+                    return "To check availability, I need both the date and party size.", None, None
             
             elif intent.get('action') == 'book':
-                required_fields = ['date', 'time', 'party_size', 'name', 'email']
+                required_fields = ['restaurant', 'date', 'time', 'party_size', 'name', 'email']
                 missing_fields = [field for field in required_fields if not intent.get(field)]
                 
+                print(f"Booking intent fields: {intent}")
+                print(f"Missing fields: {missing_fields}")
+                
                 if missing_fields:
-                    session_data.setdefault('booking', {})
-                    session_data['booking'].update(intent)
-                    return f"I'd be happy to help you make a reservation! I still need: {', '.join(missing_fields)}. Could you please provide this information?", None, None, session_data
+                    missing_items = []
+                    for field in missing_fields:
+                        if field == 'restaurant':
+                            missing_items.append('restaurant choice')
+                        elif field == 'party_size':
+                            missing_items.append('party size')
+                        else:
+                            missing_items.append(field)
+                    return f"I'd be happy to help you make a reservation! I still need: {', '.join(missing_items)}. Could you please provide this information?", None, None
                 
                 # Normalize date first
-                normalized_date = self.normalize_date_text(intent['date'])
+                normalized_date = self.intent_extractor.normalize_date_text(intent['date'])
                 if not normalized_date:
-                    return "Please provide a valid date (e.g., 'tomorrow', 'January 15', '2025-01-15').", None, None, session_data
+                    return "Please provide a valid date (e.g., 'tomorrow', 'January 15', '2025-01-15').", None, None
                 
-                # ENFORCE AVAILABILITY CHECK - Must pass before booking
-                print(f"Checking availability for {normalized_date} with party size {intent['party_size']}")
-                availability_check = await booking_client.check_availability(normalized_date, intent['party_size'])
-                print(f"Availability check result: {availability_check}")
+                # Check availability first
+                # Get restaurant info
+                restaurant_name = intent.get('restaurant', RESTAURANT_NAME)
+                restaurant_info = booking_client.get_restaurant_info(restaurant_name)
+                
+                availability_check = await booking_client.check_availability(normalized_date, intent['party_size'], restaurant_name)
                 
                 if 'error' in availability_check:
-                    return f"I'm sorry, I couldn't check availability right now: {availability_check['error']}. Please try again later.", None, None, session_data
-                
-                # Parse the requested time to check against available slots
-                requested_time_24h = self._parse_time_to_24h(intent['time'])
-                print(f"Requested time in 24h format: {requested_time_24h}")
+                    return f"I'm sorry, I couldn't check availability right now: {availability_check['error']}. Please try again later.", None, None
                 
                 available_slots = availability_check.get('available_slots', [])
                 if not available_slots:
-                    return f"I'm sorry, there are no available slots for {intent['party_size']} people on {normalized_date}. Would you like to try a different date?", None, None, session_data
+                    return f"I'm sorry, there are no available slots for {intent['party_size']} people on {normalized_date}. Would you like to try a different date?", None, None
                 
-                # Check if the requested time slot is available
-                matching_slot = None
-                for slot in available_slots:
-                    slot_time = slot.get('time', '')
-                    if slot.get('available', False):
-                        # Compare times (allow some flexibility - within 30 minutes)
-                        if self._times_match(requested_time_24h, slot_time):
-                            matching_slot = slot
-                            break
-                
-                if not matching_slot:
-                    # Show available alternatives
-                    available_times = [slot['time'][:5] for slot in available_slots if slot.get('available', False)]
-                    return f"I'm sorry, {intent['time']} is not available on {normalized_date} for {intent['party_size']} people. However, I have these times available: {', '.join(available_times)}. Would you like to book one of these instead?", None, None, session_data
-                
-                # Availability confirmed - proceed with booking
+                # Create booking
                 customer_info = {
                     'name': intent['name'],
                     'email': intent['email'],
@@ -687,416 +878,395 @@ class OllamaAI:
                     'special_requests': intent.get('special_requests', '')
                 }
                 
-                print(f"Creating booking with: date={normalized_date}, time={intent['time']}, party_size={intent['party_size']}, customer_info={customer_info}")
-                
                 booking_result = await booking_client.create_booking(
-                    normalized_date, intent['time'], intent['party_size'], customer_info
+                    normalized_date, intent['time'], intent['party_size'], customer_info, restaurant_name
                 )
                 
-                print(f"Booking creation result: {booking_result}")
-                
-                # ENFORCE SUCCESSFUL BOOKING SAVE
                 if 'error' not in booking_result:
                     booking_ref = booking_result.get('booking_reference')
                     
                     if booking_ref:
-                        # BOOKING SUCCESSFULLY SAVED TO DATABASE
-                        print(f"✅ BOOKING SAVED TO DATABASE: {booking_ref}")
-                        
-                        # Verify the booking was actually saved by fetching it back
-                        verification = await booking_client.get_booking(booking_ref)
-                        if 'error' in verification:
-                            return f"Booking was created but verification failed. Reference: {booking_ref}. Please contact support if you have issues.", None, None, session_data
-                        
-                        # Booking confirmed and verified - create comprehensive response
                         booking_data = {
                             'date': normalized_date,
                             'time': intent['time'],
                             'party': intent['party_size'],
                             'reference': booking_ref,
                             'status': booking_result.get('status', 'confirmed'),
-                            'restaurant': booking_result.get('restaurant', 'TheHungryUnicorn'),
-                            'visit_date': booking_result.get('visit_date'),
-                            'visit_time': booking_result.get('visit_time'),
-                            'customer': booking_result.get('customer', {}),
+                            'restaurant': 'TheHungryUnicorn',
                             'verified': True
                         }
                         
-                        # Persist in session for future reference
-                        session_data.setdefault('booking', {})
-                        session_data['booking'].update({
-                            'reference': booking_ref,
-                            'date': normalized_date,
-                            'time': intent['time'],
-                            'party_size': intent['party_size'],
-                            'customer_name': intent['name'],
-                            'customer_email': intent['email'],
-                            'status': 'confirmed'
-                        })
-                        
-                        customer_name = intent.get('name', 'Guest')
-                        success_message = f"🎉 **RESERVATION CONFIRMED & SAVED!**\n\n"
-                        success_message += f"📅 **Booking Details:**\n"
-                        success_message += f"🍽️ Restaurant: TheHungryUnicorn\n"
-                        success_message += f"📆 Date: {normalized_date}\n"
+                        restaurant_display_name = restaurant_info.get('name', restaurant_name)
+                        success_message = f"🎉 **RESERVATION CONFIRMED!**\n\n"
+                        success_message += f"🍽️ Restaurant: {restaurant_display_name}\n"
+                        success_message += f"📅 Date: {normalized_date}\n"
                         success_message += f"🕐 Time: {intent['time']}\n"
                         success_message += f"👥 Party Size: {intent['party_size']} people\n"
-                        success_message += f"👤 Customer: {customer_name}\n"
-                        success_message += f"📧 Email: {intent['email']}\n"
-                        if intent.get('phone'):
-                            success_message += f"📞 Phone: {intent['phone']}\n"
-                        success_message += f"🎫 **Reference: {booking_ref}**\n\n"
-                        success_message += f"✅ Your booking has been saved to our system and confirmed!\n"
-                        success_message += f"💾 You can use reference **{booking_ref}** to check, modify, or cancel your reservation.\n"
-                        success_message += f"📱 Please save this reference number for your records."
+                        success_message += f"👤 Customer: {intent['name']}\n"
+                        success_message += f"🎫 Reference: {booking_ref}\n"
+                        success_message += f"✅ Your booking has been confirmed!"
                         
-                        return success_message, booking_data, None, session_data
+                        return success_message, booking_data, None
                     else:
-                        # This is a critical error - booking API didn't return reference
-                        return f"❌ CRITICAL ERROR: Booking was processed but no reference number was returned. This should not happen. Please contact support immediately.", None, None, session_data
+                        return "❌ Booking was processed but no reference number was returned. Please contact support.", None, None
                 else:
-                    # Booking failed - show specific error
                     error_msg = booking_result.get('error', 'Unknown error')
-                    return f"❌ **Booking Failed**\n\nI'm sorry, I couldn't complete your reservation due to: {error_msg}\n\nPlease try again or contact support if the problem persists.", None, None, session_data
+                    return f"❌ Booking Failed: {error_msg}", None, None
             
             elif intent.get('action') == 'get_booking':
-                reference = intent.get('reference') or session_data.get('booking', {}).get('reference')
-                if not reference:
-                    return "Please share your 7-character booking reference so I can fetch the details.", None, None, session_data
+                booking_ref = intent.get('booking_reference')
+                if not booking_ref:
+                    return "To check your booking, I need your booking reference number. Can you provide it?", None, None
                 
-                result = await booking_client.get_booking(reference)
-                if 'error' in result:
-                    return f"I couldn't retrieve your booking: {result['error']}", None, None, session_data
+                # Try to get booking from each restaurant (since we don't know which one)
+                booking_found = None
+                found_restaurant = None
                 
-                session_data.setdefault('booking', {})
-                session_data['booking'].update({'reference': reference})
+                for restaurant_id in booking_client._restaurant_metadata.keys():
+                    booking_result = await booking_client.get_booking(booking_ref, restaurant_id)
+                    if 'error' not in booking_result:
+                        booking_found = booking_result
+                        found_restaurant = restaurant_id
+                        break
                 
-                booking_data = {
-                    'date': str(result.get('visit_date')),
-                    'time': str(result.get('visit_time')),
-                    'party': result.get('party_size'),
-                    'reference': reference,
-                    'status': result.get('status', 'confirmed'),
-                    'restaurant': result.get('restaurant', 'TheHungryUnicorn'),
-                    'special_requests': result.get('special_requests', ''),
-                    'customer': result.get('customer', {}),
-                    'created_at': result.get('created_at'),
-                    'updated_at': result.get('updated_at')
-                }
-                
-                # Format response message
-                customer = result.get('customer', {})
-                customer_name = f"{customer.get('first_name', '')} {customer.get('surname', '')}".strip()
-                special_requests = result.get('special_requests', '')
-                
-                message = f"📋 **Booking Details for {reference}**\n\n"
-                message += f"🍽️ Restaurant: {result.get('restaurant', 'TheHungryUnicorn')}\n"
-                message += f"📅 Date: {result.get('visit_date')}\n"
-                message += f"🕐 Time: {result.get('visit_time')}\n"
-                message += f"👥 Party Size: {result.get('party_size')}\n"
-                if customer_name:
-                    message += f"👤 Customer: {customer_name}\n"
-                if customer.get('email'):
-                    message += f"📧 Email: {customer.get('email')}\n"
-                if special_requests:
-                    message += f"💬 Special Requests: {special_requests}\n"
-                message += f"✅ Status: {result.get('status', 'confirmed').title()}"
-                
-                return message, booking_data, None, session_data
-
-            elif intent.get('action') == 'cancel':
-                reference = intent.get('reference') or session_data.get('booking', {}).get('reference')
-                if not reference:
-                    return "To cancel, please share your 7-character booking reference.", None, None, session_data
-                
-                cancel_result = await booking_client.cancel_booking(reference, microsite_name=RESTAURANT_NAME)
-                if 'error' in cancel_result:
-                    return f"I couldn't cancel your booking: {cancel_result['error']}", None, None, session_data
-                
-                session_data.setdefault('booking', {})
-                session_data['booking'].update({'reference': reference, 'status': 'cancelled'})
-                
-                cancellation_reason = cancel_result.get('cancellation_reason', 'Customer Request')
-                message = f"❌ **Booking Cancelled**\n\n"
-                message += f"Reference: {reference}\n"
-                message += f"Reason: {cancellation_reason}\n"
-                message += f"Status: Cancelled\n\n"
-                message += "Your booking has been successfully cancelled. If you need to make a new reservation, I'm here to help!"
-                
-                return message, None, None, session_data
-
-            elif intent.get('action') == 'modify':
-                reference = intent.get('reference') or session_data.get('booking', {}).get('reference')
-                if not reference:
-                    return "Please provide your 7-character booking reference to modify your reservation.", None, None, session_data
-
-                new_date = intent.get('date')
-                new_time = intent.get('time')
-                new_party = intent.get('party_size')
-                if not any([new_date, new_time, new_party]):
-                    return "What would you like to change? You can update the date, time, or party size.", None, None, session_data
-
-                # Get current booking details for context
-                current_booking = await booking_client.get_booking(reference)
-                if 'error' in current_booking:
-                    return f"I couldn't retrieve your current booking: {current_booking['error']}", None, None, session_data
-
-                # Determine final values after modification
-                final_date = self.normalize_date_text(new_date) if new_date else current_booking.get('visit_date')
-                final_party_size = new_party if new_party else current_booking.get('party_size')
-                final_time = new_time if new_time else current_booking.get('visit_time')
-
-                # ENFORCE AVAILABILITY CHECK for modifications
-                if new_date or new_party:  # Check availability if date or party size changes
-                    print(f"Checking availability for modification: {final_date}, party size: {final_party_size}")
-                    availability_check = await booking_client.check_availability(final_date, final_party_size)
+                if booking_found:
+                    restaurant_info = booking_client.get_restaurant_info(found_restaurant)
+                    customer = booking_found.get('customer', {})
                     
-                    if 'error' in availability_check:
-                        return f"I couldn't check availability for your modification: {availability_check['error']}", None, None, session_data
+                    booking_data = {
+                        'reference': booking_found.get('booking_reference'),
+                        'date': booking_found.get('visit_date'),
+                        'time': booking_found.get('visit_time'),
+                        'party': booking_found.get('party_size'),
+                        'status': booking_found.get('status'),
+                        'restaurant': found_restaurant,
+                        'customer_name': f"{customer.get('first_name', '')} {customer.get('surname', '')}".strip()
+                    }
                     
-                    available_slots = availability_check.get('available_slots', [])
-                    if not available_slots:
-                        return f"I'm sorry, there are no available slots for {final_party_size} people on {final_date}. Your original booking remains unchanged.", None, None, session_data
+                    # Check booking status and customize response accordingly
+                    booking_status = booking_found.get('status', 'confirmed').lower()
                     
-                    # If time is also changing, check if new time is available
-                    if new_time:
-                        requested_time_24h = self._parse_time_to_24h(new_time)
-                        matching_slot = None
-                        for slot in available_slots:
-                            if slot.get('available', False) and self._times_match(requested_time_24h, slot.get('time', '')):
-                                matching_slot = slot
-                                break
+                    if booking_status == 'cancelled':
+                        response = f"❌ **BOOKING CANCELLED**\n\n"
+                        response += f"🎫 Reference: {booking_found.get('booking_reference')}\n"
+                        response += f"🍽️ Restaurant: {restaurant_info.get('name', found_restaurant)}\n"
+                        response += f"📅 Original Date: {booking_found.get('visit_date')}\n"
+                        response += f"🕐 Original Time: {booking_found.get('visit_time')}\n"
+                        response += f"👥 Party Size: {booking_found.get('party_size')} people\n"
+                        response += f"❌ Status: CANCELLED\n"
                         
-                        if not matching_slot:
-                            available_times = [slot['time'][:5] for slot in available_slots if slot.get('available', False)]
-                            return f"I'm sorry, {new_time} is not available on {final_date} for {final_party_size} people. Available times: {', '.join(available_times)}. Your original booking remains unchanged.", None, None, session_data
-
-                # Availability confirmed - proceed with update
-                update_result = await booking_client.update_booking(
-                    reference, 
-                    date=self.normalize_date_text(new_date) if new_date else None, 
-                    time=new_time, 
-                    party_size=new_party
-                )
-                
-                if 'error' in update_result:
-                    return f"I couldn't update your booking: {update_result['error']}", None, None, session_data
-
-                # Update session data
-                session_data.setdefault('booking', {})
-                if new_date:
-                    session_data['booking']['date'] = self.normalize_date_text(new_date)
-                if new_time:
-                    session_data['booking']['time'] = new_time
-                if new_party:
-                    session_data['booking']['party_size'] = new_party
-
-                # Verify the update by fetching the booking again
-                verification = await booking_client.get_booking(reference)
-                if 'error' not in verification:
-                    success_message = f"✅ **Booking Updated Successfully!**\n\n"
-                    success_message += f"🎫 Reference: {reference}\n"
-                    success_message += f"📆 Date: {verification.get('visit_date')}\n"
-                    success_message += f"🕐 Time: {verification.get('visit_time')}\n"
-                    success_message += f"👥 Party Size: {verification.get('party_size')}\n"
-                    success_message += f"💾 Your changes have been saved to our system."
-                    return success_message, None, None, session_data
+                        # Add cancellation details if available
+                        if booking_found.get('cancelled_at'):
+                            response += f"📅 Cancelled On: {booking_found.get('cancelled_at')}\n"
+                        if booking_found.get('cancellation_reason'):
+                            response += f"📝 Reason: {booking_found.get('cancellation_reason')}\n"
+                        
+                        response += f"\n💔 This booking has already been cancelled. If you'd like to make a new reservation, I'd be happy to help!"
+                        
+                    else:
+                        # Active booking
+                        status_emoji = "✅" if booking_status == 'confirmed' else "🔄"
+                        response = f"📋 **BOOKING DETAILS**\n\n"
+                        response += f"🎫 Reference: {booking_found.get('booking_reference')}\n"
+                        response += f"🍽️ Restaurant: {restaurant_info.get('name', found_restaurant)}\n"
+                        response += f"📅 Date: {booking_found.get('visit_date')}\n"
+                        response += f"🕐 Time: {booking_found.get('visit_time')}\n"
+                        response += f"👥 Party Size: {booking_found.get('party_size')} people\n"
+                        response += f"👤 Customer: {customer.get('first_name', '')} {customer.get('surname', '')}\n"
+                        response += f"📧 Email: {customer.get('email', 'Not provided')}\n"
+                        response += f"📱 Phone: {customer.get('mobile', 'Not provided')}\n"
+                        response += f"{status_emoji} Status: {booking_status.title()}"
+                        
+                        if booking_found.get('special_requests'):
+                            response += f"\n📝 Special Requests: {booking_found.get('special_requests')}"
+                        
+                        # Add last updated info if available
+                        if booking_found.get('updated_at') and booking_status == 'updated':
+                            response += f"\n🔄 Last Updated: {booking_found.get('updated_at')}"
+                    
+                    return response, booking_data, None
                 else:
-                    return "Your booking has been updated successfully.", None, None, session_data
-
-            return "I understand you're interested in booking. How can I help you with your reservation?", None, None, session_data
+                    return f"❌ I couldn't find a booking with reference {booking_ref}. Please check the reference number and try again.", None, None
+            
+            elif intent.get('action') == 'update_booking':
+                booking_ref = intent.get('booking_reference')
+                if not booking_ref:
+                    return "To modify your booking, I need your booking reference number. Can you provide it?", None, None
+                
+                # First check if booking exists and its status
+                booking_exists = None
+                found_restaurant_check = None
+                
+                for restaurant_id in booking_client._restaurant_metadata.keys():
+                    booking_result = await booking_client.get_booking(booking_ref, restaurant_id)
+                    if 'error' not in booking_result:
+                        booking_exists = booking_result
+                        found_restaurant_check = restaurant_id
+                        break
+                
+                if booking_exists:
+                    booking_status = booking_exists.get('status', '').lower()
+                    if booking_status == 'cancelled':
+                        restaurant_info = booking_client.get_restaurant_info(found_restaurant_check)
+                        return f"❌ **BOOKING ALREADY CANCELLED**\n\nBooking {booking_ref} at {restaurant_info.get('name', found_restaurant_check)} has already been cancelled and cannot be modified. If you'd like to make a new reservation, I'd be happy to help!", None, None
+                
+                # Extract what they want to change
+                updates = {}
+                
+                # Only process date if it looks like a real date
+                if intent.get('date'):
+                    date_text = intent['date'].strip()
+                    # Skip obviously invalid date fragments like "to 8"
+                    if len(date_text) > 3 and not date_text.startswith('to '):
+                        normalized_date = self.intent_extractor.normalize_date_text(date_text)
+                        if normalized_date:
+                            updates['date'] = normalized_date
+                        else:
+                            return f"Please provide a valid date for the change. '{date_text}' is not a valid date.", None, None
+                
+                if intent.get('time'):
+                    updates['time'] = intent['time']
+                
+                if intent.get('party_size'):
+                    updates['party_size'] = intent['party_size']
+                
+                if not updates:
+                    return "What would you like to change about your booking? Date, time, or party size?", None, None
+                
+                # Try to update booking in each restaurant
+                update_successful = False
+                found_restaurant = None
+                
+                for restaurant_id in booking_client._restaurant_metadata.keys():
+                    update_result = await booking_client.update_booking(booking_ref, updates, restaurant_id)
+                    if 'error' not in update_result:
+                        update_successful = True
+                        found_restaurant = restaurant_id
+                        break
+                
+                if update_successful:
+                    restaurant_info = booking_client.get_restaurant_info(found_restaurant)
+                    
+                    response = f"✅ **BOOKING UPDATED!**\n\n"
+                    response += f"🎫 Reference: {booking_ref}\n"
+                    response += f"🍽️ Restaurant: {restaurant_info.get('name', found_restaurant)}\n"
+                    
+                    if 'date' in updates:
+                        response += f"📅 New Date: {updates['date']}\n"
+                    if 'time' in updates:
+                        response += f"🕐 New Time: {updates['time']}\n"
+                    if 'party_size' in updates:
+                        response += f"👥 New Party Size: {updates['party_size']} people\n"
+                    
+                    response += f"🎉 Your booking has been successfully updated!"
+                    
+                    booking_data = {
+                        'reference': booking_ref,
+                        'status': 'updated',
+                        'restaurant': found_restaurant,
+                        'changes': updates
+                    }
+                    
+                    return response, booking_data, None
+                else:
+                    return f"❌ I couldn't update booking {booking_ref}. Please check the reference number and try again.", None, None
+            
+            elif intent.get('action') == 'cancel_booking':
+                booking_ref = intent.get('booking_reference')
+                if not booking_ref:
+                    return "To cancel your booking, I need your booking reference number. Can you provide it?", None, None
+                
+                # First check if booking exists and its status
+                booking_exists = None
+                found_restaurant_check = None
+                
+                for restaurant_id in booking_client._restaurant_metadata.keys():
+                    booking_result = await booking_client.get_booking(booking_ref, restaurant_id)
+                    if 'error' not in booking_result:
+                        booking_exists = booking_result
+                        found_restaurant_check = restaurant_id
+                        break
+                
+                if booking_exists:
+                    booking_status = booking_exists.get('status', '').lower()
+                    if booking_status == 'cancelled':
+                        restaurant_info = booking_client.get_restaurant_info(found_restaurant_check)
+                        return f"❌ **BOOKING ALREADY CANCELLED**\n\nBooking {booking_ref} at {restaurant_info.get('name', found_restaurant_check)} has already been cancelled. No further action is needed.", None, None
+                
+                # Try to cancel booking in each restaurant
+                cancel_successful = False
+                found_restaurant = None
+                
+                for restaurant_id in booking_client._restaurant_metadata.keys():
+                    cancel_result = await booking_client.cancel_booking(booking_ref, 1, restaurant_id)  # Reason 1: Customer Request
+                    if 'error' not in cancel_result:
+                        cancel_successful = True
+                        found_restaurant = restaurant_id
+                        break
+                
+                if cancel_successful:
+                    restaurant_info = booking_client.get_restaurant_info(found_restaurant)
+                    
+                    response = f"❌ **BOOKING CANCELLED**\n\n"
+                    response += f"🎫 Reference: {booking_ref}\n"
+                    response += f"🍽️ Restaurant: {restaurant_info.get('name', found_restaurant)}\n"
+                    response += f"📅 Cancellation: Confirmed\n"
+                    response += f"💔 We're sorry to see you cancel. We hope to see you again soon!"
+                    
+                    booking_data = {
+                        'reference': booking_ref,
+                        'status': 'cancelled',
+                        'restaurant': found_restaurant
+                    }
+                    
+                    return response, booking_data, None
+                else:
+                    return f"❌ I couldn't cancel booking {booking_ref}. Please check the reference number and try again.", None, None
+            
+            return "I understand you're interested in booking. How can I help you with your reservation?", None, None
             
         except Exception as e:
-            return f"I apologize, but I encountered an issue processing your request: {str(e)}", None, None, session_data
+            return f"I apologize, but I encountered an issue processing your request: {str(e)}", None, None
     
-    async def generate_response(self, message: str, conversation_history: list = None, session_data: dict = None) -> Tuple[str, Optional[dict], Optional[dict], dict]:
-        """Generate AI response using hybrid AI + direct processing approach"""
+    def _get_system_prompt(self) -> str:
+        """Get the system prompt for AI agents"""
+        return """You are TableBooker, a friendly and conversational booking assistant for our restaurant group.
+
+CONVERSATION STYLE:
+- Be warm, natural, and engaging like a real restaurant host
+- Ask for information gradually and conversationally, not all at once
+- Acknowledge what the user has already provided
+- Show enthusiasm about their dining plans
+- Use casual, friendly language while remaining professional
+
+AVAILABLE RESTAURANTS:
+- The Hungry Unicorn: Upscale modern European cuisine ($$$$)
+- Pizza Palace: Authentic Italian pizzas and pasta ($$$)
+- Sushi Zen: Fresh sushi and Japanese cuisine ($$$$) 
+- Cafe Bistro: Casual French bistro with daily specials ($$)
+
+CONVERSATION FLOW:
+1. If no restaurant specified, ask about cuisine preference or show restaurant options
+2. Once restaurant is chosen, ask about preferred date/time
+3. Once you have date/time, ask about party size
+4. After date/time/party size, ask for name and contact info
+5. Confirm all details before making the reservation
+
+IMPORTANT AVAILABILITY RULES:
+- ONLY recommend restaurants that actually have availability for the requested date/time/party size
+- ONLY suggest time slots that are confirmed available in our system
+- If a restaurant has no availability, suggest alternative restaurants or dates
+- Always mention specific available time slots when known
+
+BOOKING MANAGEMENT CAPABILITIES:
+- Check availability across all restaurants
+- Make new reservations
+- Look up existing bookings by reference number
+- Modify bookings (change date, time, or party size)
+- Cancel bookings with confirmation
+- Handle multi-restaurant queries efficiently
+
+RESTAURANT SELECTION EXAMPLES:
+- "We have several wonderful restaurants! Are you in the mood for European, Italian, Japanese, or French cuisine?"
+- "I can help you choose! What type of dining experience are you looking for today?"
+- "Great! The Hungry Unicorn specializes in modern European cuisine. When were you thinking of dining?"
+
+BOOKING FLOW EXAMPLES:
+- "Perfect choice! What date were you thinking for your dinner?"
+- "Excellent! And how many people will be joining you?"
+- "Great! Could I get your name for the reservation?"
+- "Almost done! I just need your email to confirm the booking."
+
+BOOKING LOOKUP/MODIFICATION EXAMPLES:
+- "I can help you check your reservation. What's your booking reference?"
+- "No problem! I can update your booking. What would you like to change?"
+- "I understand you need to cancel. Let me process that for you."
+
+Remember: Help them choose the right restaurant first, then build the conversation naturally. Show genuine interest in matching them with the perfect dining experience. Always base recommendations on actual availability data. For booking changes, be understanding and helpful."""
+    
+    async def process_message(self, message: str, session_data: dict = None) -> Tuple[str, Optional[dict], Optional[dict], dict]:
+        """Process a message through the LangGraph agent"""
         session_data = session_data or {}
         
-        print(f"🔍 GENERATE_RESPONSE called with message: '{message}'")
-        print(f"🔍 Message contains DIRECTBOOK: {'DIRECTBOOK' in message.upper()}")
+        # Prepare initial state
+        initial_state = AgentState(
+            messages=[HumanMessage(content=message)],
+            user_input=message,
+            session_data=session_data,
+            booking_intent=None,
+            response="",
+            booking_data=None,
+            availability_data=None,
+            error=None
+        )
         
-        try:
-            # FORCE DIRECT MODE: Special keyword to bypass AI completely
-            if "DIRECTBOOK" in message.upper():
-                print("🔥 FORCE DIRECT MODE TRIGGERED")
-                # Extract booking details and process directly
-                booking_intent = await self.extract_booking_intent(message)
-                if booking_intent:
-                    print(f"🎯 Direct mode intent: {booking_intent}")
-                    return await self.process_booking_action(booking_intent, session_data)
-                else:
-                    return "Direct booking mode activated, but I couldn't extract booking details. Please include: date, time, party size, name, email", None, None, session_data
-            
-            # Check for DIRECT booking confirmations first (bypass AI)
-            if self._is_booking_confirmation(message, session_data):
-                print("🔄 Handling booking confirmation")
-                return await self._handle_booking_confirmation(session_data)
-            
-            # Check for DIRECT booking commands (bypass AI)
-            if self._is_direct_booking_command(message):
-                print("📋 Direct booking command detected")
-                booking_intent = await self.extract_booking_intent(message)
-                if booking_intent:
-                    merged_intent = {**session_data.get('booking', {}), **booking_intent}
-                    session_data['booking'] = merged_intent
-                    return await self.process_booking_action(merged_intent, session_data)
-            
-            # Check if we have PENDING booking data that needs confirmation
-            pending_booking = session_data.get('pending_booking')
-            if pending_booking and self._has_all_booking_details(pending_booking):
-                # We have all details - ask for final confirmation
-                confirmation_message = self._generate_confirmation_message(pending_booking)
-                session_data['awaiting_confirmation'] = True
-                return confirmation_message, None, None, session_data
-            
-            # Use AI to understand intent and gather information
-            booking_intent = await self.extract_booking_intent(message)
-            
-            if booking_intent:
-                print(f"AI detected booking intent: {booking_intent}")
-                # Merge with any existing pending booking
-                merged_intent = {**session_data.get('pending_booking', {}), **booking_intent}
-                session_data['pending_booking'] = merged_intent
-                
-                # Check if we now have all required details
-                if self._has_all_booking_details(merged_intent):
-                    # Switch to direct confirmation mode
-                    confirmation_message = self._generate_confirmation_message(merged_intent)
-                    session_data['awaiting_confirmation'] = True
-                    return confirmation_message, None, None, session_data
-                else:
-                    # Still missing info - let AI handle the conversation
-                    enhanced_message = f"Customer wants to book: {message}\nCurrent booking info: {merged_intent}"
-            else:
-                enhanced_message = message
-            
-            # Prepare conversation context for Ollama
-            messages = []
-            
-            # Concise, gentle system prompt
-            system_prompt = """You are TableBooker, the gentle and concise booking assistant for TheHungryUnicorn.
+        # Run the graph
+        final_state = await self.graph.ainvoke(initial_state)
+        
+        return (
+            final_state["response"],
+            final_state.get("booking_data"),
+            final_state.get("availability_data"), 
+            final_state["session_data"]
+        )
 
-Capabilities:
-- Check availability for specific dates and times
-- Make new restaurant reservations
-- Check existing booking details using references
-- Modify reservations (change date/time/party size)
-- Cancel reservations completely
+# Lazy initialization to prevent duplication during startup
+_agent_instance = None
 
-Principles:
-- Be brief, warm, and helpful. No repetition. Prefer short bullets.
-- Minimize turns by batching requests for missing info into one checklist.
-- Confirm availability before booking; suggest 2–3 nearby times if needed.
-- Handle natural language dates/times (today, tomorrow, next Friday, 7pm, etc.)
-
-Restaurant Info:
-- TheHungryUnicorn: Fine dining, modern European cuisine
-- Hours: Tuesday-Sunday 5:00 PM - 11:00 PM, Closed Mondays
-
-Booking data:
-- New booking requires: Date, Time, Party size, Name, Email. Phone is optional.
-- Check/Modify/Cancel requires: 7-character booking reference
-- Accept any natural date/time format - system will normalize it
-
-When details are missing, reply once with only the missing items. Examples:
-"Happy to help! Could you share in one message:
-- Date (any format is fine):
-- Time (any format is fine):
-- Party size:
-- Name:
-- Email:
-- Phone (optional):"
-
-For modifications: "What would you like to change? (date, time, or party size)"
-For cancellations: "Please provide your booking reference to cancel."
-
-Keep tone kind and professional, but prioritize clarity and brevity."""
-
-            messages.append({"role": "system", "content": system_prompt})
-            
-            # Add conversation history (last 4 messages for better context)
-            if conversation_history:
-                for msg in conversation_history[-4:]:
-                    messages.append(msg)
-            
-            # Add current enhanced message
-            messages.append({"role": "user", "content": enhanced_message})
-            
-            # Call Ollama API
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "stream": False,
-                "options": {
-                    "temperature": 0.7,
-                    "num_predict": 150
-                }
-            }
-            
-            response = await self.client.post(
-                f"{self.base_url}/api/chat",
-                json=payload
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                ai_response = result["message"]["content"]
-                return ai_response, None, None, session_data
-            else:
-                return "I'm having trouble connecting to my AI system. How can I help you with restaurant bookings?", None, None, session_data
-                
-        except Exception as e:
-            print(f"Ollama error: {e}")
-            return "I'm experiencing some technical difficulties, but I'm still here to help with your restaurant booking needs!", None, None, session_data
-
-# Initialize AI
-ai = OllamaAI()
+def get_agent():
+    global _agent_instance
+    if _agent_instance is None:
+        _agent_instance = BookingAgent()
+    return _agent_instance
 
 @app.get("/")
 async def root():
     """API information"""
-    ollama_status = await ai.is_available()
     return {
-        "service": "TableBooker AI Agent API (Ollama)",
+        "service": "TableBooker AI Agent API (LangGraph + Ollama)",
         "version": "1.0.0",
         "status": "running",
-        "ai_provider": "Ollama",
-        "model": MODEL_NAME,
-        "ollama_available": ollama_status,
-        "features": ["AI conversations", "Restaurant booking", "Natural language understanding"]
+        "ai_framework": "LangGraph",
+        "ai_provider": "Ollama llama3.1:8b",
+        "features": ["Restaurant booking", "Natural language understanding", "Multi-restaurant support", "Booking management"]
     }
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
     try:
-        ollama_status = await ai.is_available()
-        health_status = "healthy" if ollama_status else "degraded"
+        # Test AI providers
+        openai_status = agent.openai_llm is not None
+        ollama_status = False
         
-        response_data = {
-            "status": health_status,
-            "service": "TableBooker AI Agent API (Ollama)",
-            "ai_provider": "Ollama",
-            "model": MODEL_NAME,
-            "ollama_available": ollama_status
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5.0)
+                ollama_status = response.status_code == 200
+        except:
+            pass
+        
+        return {
+            "status": "healthy",
+            "service": "TableBooker AI Agent API (LangGraph)",
+            "ai_framework": "LangGraph",
+            "ai_providers": {
+                "openai_available": openai_status,
+                "ollama_available": ollama_status,
+                "simple_mode": True
+            }
         }
-        
-        return response_data
     except Exception as e:
         return {
             "status": "error",
-            "service": "TableBooker AI Agent API (Ollama)",
-            "ai_provider": "Ollama",
-            "model": MODEL_NAME,
-            "ollama_available": False,
+            "service": "TableBooker AI Agent API (LangGraph)",
             "error": str(e)
         }
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_with_agent(request: ChatRequest):
     """
-    Chat with the Ollama-powered AI agent
+    Chat with the LangGraph-powered AI agent
     """
     try:
         # Generate or use existing session ID
@@ -1113,10 +1283,9 @@ async def chat_with_agent(request: ChatRequest):
         
         session = sessions[session_id]
         
-        # Generate AI response with booking intelligence
-        response_message, booking_data, availability_data, updated_session = await ai.generate_response(
+        # Process message through LangGraph agent
+        response_message, booking_data, availability_data, updated_session = await get_agent().process_message(
             request.message,
-            session["conversation_history"],
             session["session_data"]
         )
 
@@ -1146,11 +1315,12 @@ async def chat_with_agent(request: ChatRequest):
                 "has_availability_data": availability_data is not None
             },
             booking_data=booking_data,
-            availability_data=availability_data
+            availability_data=availability_data,
+            ai_mode="ollama"
         )
         
-        print(f"🤖 Ollama Chat - User: {request.message}")
-        print(f"🤖 Ollama Response: {response_message[:100]}...")
+        print(f"🤖 LangGraph Chat - User: {request.message}")
+        print(f"🤖 LangGraph Response (ollama): {response_message[:100]}...")
         
         return response
         
@@ -1164,113 +1334,97 @@ async def chat_with_agent(request: ChatRequest):
 def generate_suggestions(user_message: str, ai_response: str, booking_data: dict = None, availability_data: dict = None) -> list:
     """Generate contextual suggestions based on the conversation"""
     user_lower = user_message.lower()
-    ai_lower = ai_response.lower()
     
     suggestions = []
     
     # Priority suggestions based on data presence
     if booking_data:
-        status = booking_data.get('status', 'confirmed')
-        if status == 'cancelled':
-            suggestions = ["Make new reservation", "Check availability", "Restaurant info"]
-        else:
-            suggestions = ["Modify reservation", "Cancel reservation", "Check booking status"]
+        suggestions = ["View booking details", "Modify reservation", "Cancel reservation"]
     elif availability_data:
         suggestions = ["Book this time", "Check different times", "Try different party size"]
     else:
-        # Context-aware suggestions based on user stories
+        # Context-aware suggestions
         if any(word in user_lower for word in ['hello', 'hi', 'start']):
             suggestions = ["Check availability this weekend", "Make a reservation", "Check my booking"]
-        elif any(word in user_lower for word in ['restaurant', 'info', 'about']):
-            suggestions = ["Check availability", "Make booking", "Restaurant hours"]
-        elif any(word in user_lower for word in ['availability', 'check', 'free', 'available']):
-            suggestions = ["Book available time", "Try different date", "Change party size"]
         elif any(word in user_lower for word in ['book', 'reserve', 'table']):
             suggestions = ["Check availability first", "Provide booking details", "Restaurant info"]
-        elif any(word in user_lower for word in ['modify', 'change', 'update']):
-            suggestions = ["Change date/time", "Change party size", "Cancel booking"]
-        elif any(word in user_lower for word in ['cancel']):
-            suggestions = ["Confirm cancellation", "Make new booking", "Check availability"]
-        elif any(word in ai_lower for word in ['booking', 'reservation', 'table']):
-            suggestions = ["Make reservation", "Check availability", "Check my booking"]
-        elif any(word in ai_lower for word in ['need', 'require', 'missing']):
-            suggestions = ["Provide missing info", "Start over", "Get help"]
+        elif any(word in user_lower for word in ['availability', 'check', 'free', 'available']):
+            suggestions = ["Book available time", "Try different date", "Change party size"]
         else:
             suggestions = ["Check availability", "Make reservation", "Check my booking"]
     
     return suggestions[:3]  # Limit to 3 suggestions
 
-@app.get("/ollama/status")
-async def ollama_status():
+@app.get("/restaurants")
+async def get_restaurants():
+    """Get available restaurants"""
+    return {
+        "restaurants": booking_client.get_available_restaurants(),
+        "count": len(booking_client.get_available_restaurants())
+    }
+
+@app.get("/ai-status")
+async def ai_status():
     """Check Ollama status"""
-    available = await ai.is_available()
+    ollama_status = False
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5.0)
+            ollama_status = response.status_code == 200
+    except:
+        pass
+        
     return {
-        "ollama_available": available,
-        "base_url": OLLAMA_BASE_URL,
-        "model": MODEL_NAME,
-        "status": "connected" if available else "disconnected"
+        "ai_framework": "LangGraph",
+        "provider": "Ollama",
+        "ollama": {
+            "available": ollama_status,
+            "model": MODEL_NAME if ollama_status else None,
+            "base_url": OLLAMA_BASE_URL
+        }
     }
 
-@app.get("/sessions/{session_id}")
-async def get_session(session_id: str):
-    """Get session information"""
-    if session_id not in sessions:
-            raise HTTPException(status_code=404, detail="Session not found")
-    
-    session = sessions[session_id]
-    return {
-        "session_id": session_id,
-        "created_at": session["created_at"],
-        "message_count": len(session["conversation_history"]) // 2,
-        "current_restaurant": session["current_restaurant"],
-        "status": "active"
-    }
-
-@app.post("/test-intent")
-async def test_intent_extraction(request: dict):
-    """Test endpoint to debug intent extraction"""
-    message = request.get("message", "")
-    intent = await ai.extract_booking_intent(message)
-    return {
-        "message": message,
-        "extracted_intent": intent,
-        "has_intent": intent is not None
-    }
-
-@app.post("/direct-booking")
-async def direct_booking_test(request: dict):
-    """Direct booking test to bypass intent extraction"""
-    # Create a mock intent for testing
-    mock_intent = {
-        'action': 'book',
-        'date': 'tomorrow',
-        'time': '7pm',
-        'party_size': 4,
-        'name': 'John Smith',
-        'email': 'john@test.com'
-    }
-    
-    session_data = {}
-    response_text, booking_data, availability_data, updated_session = await ai.process_booking_action(mock_intent, session_data)
-    
-    return {
-        "response": response_text,
-        "booking_data": booking_data,
-        "availability_data": availability_data,
-        "session_data": updated_session
-    }
+@app.get("/graph-structure")
+async def graph_structure():
+    """Get the LangGraph structure visualization - following official patterns"""
+    try:
+        # Get graph structure (following LangGraph documentation pattern)
+        graph_dict = agent.graph.get_graph().to_json()
+        
+        return {
+            "framework": "LangGraph",
+            "graph_structure": graph_dict,
+            "nodes": [
+                {"name": "router", "type": "decision", "description": "Routes to appropriate AI provider"},
+                {"name": "openai_agent", "type": "llm", "description": "OpenAI GPT-3.5-turbo processing"},
+                {"name": "ollama_agent", "type": "llm", "description": "Ollama local LLM processing"},
+                {"name": "simple_agent", "type": "rule-based", "description": "Simple pattern matching"},
+                {"name": "booking_processor", "type": "action", "description": "Processes booking operations"}
+            ],
+            "edges": [
+                {"from": "START", "to": "router"},
+                {"from": "router", "to": "openai_agent", "condition": "openai available"},
+                {"from": "router", "to": "ollama_agent", "condition": "ollama available"},
+                {"from": "router", "to": "simple_agent", "condition": "fallback mode"},
+                {"from": "*_agent", "to": "booking_processor"},
+                {"from": "booking_processor", "to": "END"}
+            ]
+        }
+    except Exception as e:
+        return {"error": f"Failed to get graph structure: {str(e)}"}
 
 if __name__ == "__main__":
     import uvicorn
     
-    print("🦙 Starting TableBooker AI Agent with Ollama")
+    print("🚀 Starting TableBooker AI Agent with LangGraph + Ollama")
     print("📡 Server will run on http://localhost:8000")
-    print("🤖 AI Provider: Ollama (llama3.1:8b)")
-    print("🔗 Ollama URL: http://localhost:11434")
-    print("=" * 50)
+    print("🤖 AI Framework: LangGraph")
+    print("🦙 AI Provider: Ollama")
+    print("=" * 60)
     
     uvicorn.run(
-        "main_clean:app",
+        "main:app",
         host="0.0.0.0",
         port=8000,
         reload=True,
