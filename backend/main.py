@@ -39,6 +39,7 @@ class ChatResponse(BaseModel):
     booking_data: Optional[Dict[str, Any]] = None
     availability_data: Optional[Dict[str, Any]] = None
     ai_mode: str = "unknown"
+    intent: Optional[Dict[str, Any]] = None
 
 # Agent State for LangGraph - Following official patterns
 class AgentState(TypedDict):
@@ -192,15 +193,47 @@ class BookingAPIClient:
             restaurant = db.query(Restaurant).filter(Restaurant.microsite_name == restaurant_id).first()
             if restaurant:
                 metadata = self._restaurant_metadata.get(restaurant_id, {})
-                return {
+            return {
                     "name": restaurant.name,
                     "description": metadata.get("description", "Restaurant"),
                     "cuisine": metadata.get("cuisine", "International"),
                     "price_range": metadata.get("price_range", "$$$")
                 }
-            return {}
+            # Not found fallback
+            return {
+                "name": restaurant_id,
+                "description": "Restaurant",
+                "cuisine": "International",
+                "price_range": "$$$"
+            }
+        finally:
+            db.close()  # Close the database connection
+
+    def resolve_restaurant_identifier(self, value: Optional[str]) -> Optional[str]:
+        """Resolve user-provided restaurant string to canonical microsite_name.
+        Matches against DB names and known microsite keys, ignoring spaces and case.
+        """
+        if not value:
+            return None
+        raw = value.strip()
+        norm = re.sub(r"\s+", "", raw).lower()
+        # Build lookup maps
+        db = get_db()
+        try:
+            restaurants = db.query(Restaurant).all()
+            # Check microsite and name
+            for r in restaurants:
+                if norm == re.sub(r"\s+", "", r.microsite_name).lower():
+                    return r.microsite_name
+                if norm == re.sub(r"\s+", "", r.name).lower():
+                    return r.microsite_name
+            # Fallback to metadata keys
+            for microsite in self._restaurant_metadata.keys():
+                if norm == re.sub(r"\s+", "", microsite).lower():
+                    return microsite
         finally:
             db.close()
+        return None
     
     def _normalize_time_to_hhmmss(self, time_str: str) -> str:
         """Convert various time formats to HH:MM:SS format required by API"""
@@ -264,7 +297,7 @@ class BookingAPIClient:
                 return response.json()
             else:
                 return {"error": f"API error: {response.status_code}"}
-                
+        
         except Exception as e:
             return {"error": f"Failed to check availability: {str(e)}"}
     
@@ -509,24 +542,27 @@ class IntentExtractor:
         if email_match:
             intent['email'] = email_match.group(0)
         
-        # Extract booking reference (alphanumeric codes with mixed case/numbers)
+        # Extract booking reference:
+        # exactly 7 alphanumeric characters, letters must be uppercase (A-Z0-9){7}
         booking_ref_patterns = [
-            r'reference\s+([A-Z0-9]{6,8})',  # "reference ABC123"
-            r'booking\s+reference\s+([A-Z0-9]{6,8})',  # "booking reference ABC123"
-            r'ref\s+([A-Z0-9]{6,8})',  # "ref ABC123"
-            r'#([A-Z0-9]{6,8})',  # "#ABC123"
-            r'\b([A-Z0-9]*[0-9][A-Z0-9]*[A-Z][A-Z0-9]*|[A-Z0-9]*[A-Z][A-Z0-9]*[0-9][A-Z0-9]*)\b',  # Mixed letters/numbers pattern
+            r'booking\s+reference(?:\s+is)?\s+([A-Z0-9]{7})',
+            r'reference(?:\s+is)?\s+([A-Z0-9]{7})',
+            r'booking\s+([A-Z0-9]{7})',
+            r'ref(?:\s+is)?\s+([A-Z0-9]{7})',
+            r'#([A-Z0-9]{7})',
+            r'my\s+booking\s+([A-Z0-9]{7})',
+            r'\b([A-Z0-9]{7})\b',
         ]
         for pattern in booking_ref_patterns:
             match = re.search(pattern, message.upper())
             if match:
                 ref = match.group(1)
-                # Ensure it's not a common word and has mixed alphanumeric
-                excluded_words = ['BOOKING', 'REFERENCE', 'TOMORROW', 'TONIGHT', 'CANCEL', 'CHANGE', 'UPDATE', 'MODIFY']
+                # Ensure it's not a common word and is a valid booking reference format
+                excluded_words = ['BOOKING', 'REFERENCE', 'TOMORROW', 'TONIGHT', 'CANCEL', 'CHANGE', 'UPDATE', 'MODIFY', 'CONFIRM', 'CONFIRMATION', 'CONFIRMING']
                 if (ref not in excluded_words and 
-                    len(ref) >= 6 and 
-                    any(c.isdigit() for c in ref) and 
-                    any(c.isalpha() for c in ref)):
+                    len(ref) == 7 and
+                    bool(re.fullmatch(r'[A-Z0-9]{7}', ref)) and
+                    any(ch.isdigit() for ch in ref)):
                     intent['booking_reference'] = ref
                     print(f"Extracted booking reference: {ref}")
                     break
@@ -608,6 +644,90 @@ class BookingAgent:
         
         # Build the agent graph
         self.graph = self._build_agent_graph()
+
+    async def _extract_intent_with_llm(self, user_input: str, session_booking: dict) -> Optional[Dict[str, Any]]:
+        """Primary intent extraction using Ollama. Returns a dict with parsed intent fields.
+
+        This relies on the LLM to infer user intent from natural language and conversation context.
+        """
+        try:
+            system_prompt = (
+                "You are an intent extraction assistant for a restaurant booking agent. "
+                "Extract the user's intent and details from the message. "
+                "Always respond with a single JSON object only, no prose. Keys: "
+                "action(one of: check_availability, book, get_booking, update_booking, cancel_booking, info), "
+                "restaurant, date, time, party_size(number), name, email, phone, booking_reference(7 uppercase alphanumeric with at least 1 digit if present), "
+                "notes(optional reasoning), missing(list of fields still needed). "
+                "If user asks general info (policies, hours), set action='info'. "
+                "If user mentions 'this weekend', set date='weekend' unless a specific day is given. "
+                "If not sure, leave fields null and include them in missing."
+            )
+
+            # Provide minimal context from session if available
+            context_lines = []
+            for key in ["restaurant", "date", "time", "party_size", "name", "email", "booking_reference"]:
+                val = session_booking.get(key)
+                if val:
+                    context_lines.append(f"{key}={val}")
+            context_text = ", ".join(context_lines) if context_lines else "none"
+
+            user_prompt = (
+                "Conversation context: " + context_text + "\n" +
+                "User message: " + user_input + "\n" +
+                "Return JSON only."
+            )
+
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt),
+            ]
+
+            raw = await self.ollama_llm.ainvoke(messages)
+            content = raw if isinstance(raw, str) else getattr(raw, "content", str(raw))
+
+            # Try to locate JSON in the response
+            def _safe_json_loads(txt: str) -> Optional[dict]:
+                try:
+                    return json.loads(txt)
+                except Exception:
+                    # Try to extract a JSON object substring
+                    m = re.search(r"\{[\s\S]*\}", txt)
+                    if m:
+                        try:
+                            return json.loads(m.group(0))
+                        except Exception:
+                            return None
+                    return None
+
+            parsed = _safe_json_loads(content)
+            if not parsed or not isinstance(parsed, dict):
+                return None
+
+            # Normalize some fields
+            if parsed.get("party_size") is not None:
+                try:
+                    parsed["party_size"] = int(parsed["party_size"])
+                except Exception:
+                    parsed["party_size"] = None
+
+            # Enforce booking reference format if provided
+            br = parsed.get("booking_reference")
+            if br:
+                br_up = br.upper()
+                if re.fullmatch(r"[A-Z0-9]{7}", br_up) and any(ch.isdigit() for ch in br_up):
+                    parsed["booking_reference"] = br_up
+                else:
+                    parsed["booking_reference"] = None
+
+            # Map action defaults
+            action = parsed.get("action")
+            if action not in {"check_availability", "book", "get_booking", "update_booking", "cancel_booking", "info"}:
+                parsed["action"] = None
+
+            return parsed
+        except Exception as e:
+            print(f"LLM intent extraction failed: {e}")
+            return None
     
     def _build_agent_graph(self) -> StateGraph:
         """Build the LangGraph agent workflow following official patterns"""
@@ -666,11 +786,34 @@ class BookingAgent:
                     times = avail_data['available_times']
                     context_info += f"- {', '.join(times)}\n"
             
-            enhanced_prompt = system_prompt + context_info
+            # Add conversation summary for long conversations
+            conversation_summary = ""
+            if state.get("messages") and len(state["messages"]) > 20:
+                conversation_summary += "\n\nCONVERSATION SUMMARY:\n"
+                conversation_summary += "This is a long conversation. Key context from earlier messages:\n"
+                # Analyze early messages for key information
+                early_messages = state["messages"][:6]
+                for msg in early_messages:
+                    if hasattr(msg, 'content') and len(msg.content) > 10:
+                        role = "User" if msg.__class__.__name__ == "HumanMessage" else "Assistant"
+                        conversation_summary += f"- {role}: {msg.content[:80]}{'...' if len(msg.content) > 80 else ''}\n"
+            
+            enhanced_prompt = system_prompt + context_info + conversation_summary
             messages = [SystemMessage(content=enhanced_prompt)]
-            # Add existing messages from state if any  
+            
+            # Intelligent message management for long conversations
             if state.get("messages"):
-                messages.extend(state["messages"])
+                total_messages = len(state["messages"])
+                
+                if total_messages <= 20:
+                    # For shorter conversations, include all messages
+                    messages.extend(state["messages"])
+                else:
+                    # For longer conversations (>20 messages), use sliding window approach
+                    # Include: first 3 messages + last 15 messages
+                    messages.extend(state["messages"][:3])  # Early context
+                    messages.extend(state["messages"][-15:])  # Recent context
+            
             # Add current user input
             messages.append(HumanMessage(content=user_message))
             
@@ -691,7 +834,7 @@ class BookingAgent:
             
         except Exception as e:
             print(f"❌ Ollama Agent error: {e}")
-            return {
+        return {
                 "response": "I apologize, but I'm having trouble processing your request right now. Please try again.",
                 "messages": [AIMessage(content="I apologize, but I'm having trouble processing your request right now. Please try again.")],
                 "error": str(e)
@@ -702,8 +845,11 @@ class BookingAgent:
         print("📋 Booking Processor: Processing...")
         
         try:
-            # Extract intent from user message
-            intent = await self.intent_extractor.extract_booking_intent(state["user_input"])
+            # Prefer Ollama LLM to infer intent from natural language
+            intent = await self._extract_intent_with_llm(state["user_input"], state["session_data"].get("booking_info", {}))
+            # Fallback to deterministic extractor if LLM did not yield a usable intent
+            if not intent:
+                intent = await self.intent_extractor.extract_booking_intent(state["user_input"])
             print(f"🔍 Extracted intent: {intent}")
             
             # Get or initialize booking information from session
@@ -718,6 +864,11 @@ class BookingAgent:
             # Update session data
             updated_session = state["session_data"].copy()
             updated_session["booking_info"] = session_booking
+            # Persist last extracted intent for debugging/clients
+            updated_session["last_intent"] = intent
+            # Track current restaurant in session for UI/context
+            if session_booking.get("restaurant"):
+                updated_session["current_restaurant"] = session_booking["restaurant"]
             
             # Prepare state updates
             updates = {
@@ -753,7 +904,7 @@ class BookingAgent:
             
             print("✅ Booking Processor: Completed")
             return updates
-            
+        
         except Exception as e:
             print(f"❌ Booking Processor error: {e}")
             return {"error": str(e)}
@@ -777,6 +928,28 @@ class BookingAgent:
         """Process booking actions and return response with booking/availability data"""
         try:
             if intent.get('action') == 'check_availability':
+                # Progressive follow-ups for missing info
+                if not intent.get('date') or not intent.get('party_size'):
+                    missing = []
+                    if not intent.get('date'):
+                        missing.append('date')
+                    if not intent.get('party_size'):
+                        missing.append('party size')
+                    # Ask one thing at a time for a smoother flow
+                    if len(missing) == 2:
+                        return "To check availability, could you share the date and how many people?", None, None
+                    if 'party size' in missing:
+                        # If user just sent a bare number like "3", capture it to session and proceed
+                        m = re.search(r"\b(\d{1,2})\b", state["user_input"]) 
+                        if m:
+                            try:
+                                session_data["booking_info"]["party_size"] = int(m.group(1))
+                            except Exception:
+                                pass
+                        return "Great! How many people will be dining?", None, None
+                    if 'date' in missing:
+                        return "What date would you like? You can say 'tomorrow', 'Friday', or a specific date like 2025-08-16.", None, None
+
                 if intent.get('date') and intent.get('party_size'):
                     normalized_date = self.intent_extractor.normalize_date_text(intent['date'])
                     if not normalized_date:
@@ -784,7 +957,7 @@ class BookingAgent:
                     
                     # Check availability across all restaurants if no specific restaurant chosen
                     if intent.get('restaurant'):
-                        restaurant_name = intent['restaurant']
+                        restaurant_name = booking_client.resolve_restaurant_identifier(intent['restaurant']) or intent['restaurant']
                         availability_result = await booking_client.check_availability(normalized_date, intent['party_size'], restaurant_name)
                         
                         if 'error' not in availability_result:
@@ -831,7 +1004,8 @@ class BookingAgent:
                         else:
                             return f"I'm sorry, none of our restaurants have availability on {normalized_date} for {intent['party_size']} people. Would you like to try a different date?", None, None
                 else:
-                    return "To check availability, I need both the date and party size.", None, None
+                    # Fallback (shouldn't reach here due to early returns above)
+                    return "To check availability, please provide the date and party size.", None, None
             
             elif intent.get('action') == 'book':
                 required_fields = ['restaurant', 'date', 'time', 'party_size', 'name', 'email']
@@ -840,16 +1014,64 @@ class BookingAgent:
                 print(f"Booking intent fields: {intent}")
                 print(f"Missing fields: {missing_fields}")
                 
+                # Progressive information gathering: ask one clear next question instead of listing all
                 if missing_fields:
-                    missing_items = []
-                    for field in missing_fields:
-                        if field == 'restaurant':
-                            missing_items.append('restaurant choice')
-                        elif field == 'party_size':
-                            missing_items.append('party size')
-                        else:
-                            missing_items.append(field)
-                    return f"I'd be happy to help you make a reservation! I still need: {', '.join(missing_items)}. Could you please provide this information?", None, None
+                    user_text = state["user_input"].lower()
+                    # 1) Restaurant selection first
+                    if 'restaurant' in missing_fields:
+                        try:
+                            # Build a concise options list with cuisines
+                            options = []
+                            for rid, meta in booking_client._restaurant_metadata.items():
+                                name = meta.get('name', rid)
+                                cuisine = meta.get('cuisine', '')
+                                options.append(f"{name}{f' ({cuisine})' if cuisine else ''}")
+                            options_text = ", ".join(options[:4])
+                        except Exception:
+                            options_text = "The Hungry Unicorn, Pizza Palace, Sushi Zen, Cafe Bistro"
+                        return (
+                            "Great! Which restaurant would you like to book? "
+                            f"Options include: {options_text}."
+                        ), None, None
+                    
+                    # 2) Date next
+                    if 'date' in missing_fields:
+                        if 'weekend' in user_text:
+                            return (
+                                "Happy to help this weekend! Do you prefer Saturday or Sunday? "
+                                "If you have a rough time in mind, let me know too."
+                            ), None, None
+                        return (
+                            "What date would you like? You can say 'tomorrow', 'Friday', or '2025-08-15'."
+                        ), None, None
+                    
+                    # 3) Party size
+                    if 'party_size' in missing_fields:
+                        return "How many people will be dining?", None, None
+                    
+                    # 4) Time – propose times if we can, otherwise ask
+                    if 'time' in missing_fields:
+                        restaurant_name = booking_client.resolve_restaurant_identifier(intent.get('restaurant')) or intent.get('restaurant') or RESTAURANT_NAME
+                        date_text = intent.get('date')
+                        normalized_date = self.intent_extractor.normalize_date_text(date_text) if date_text else None
+                        if normalized_date and intent.get('party_size'):
+                            availability_check = await booking_client.check_availability(normalized_date, intent['party_size'], restaurant_name)
+                            if 'error' not in availability_check:
+                                available_slots = availability_check.get('available_slots', [])
+                                time_options = [slot['time'] for slot in available_slots if slot.get('available', False)]
+                                if time_options:
+                                    top = ", ".join(time_options[:5])
+                                    return (
+                                        f"These times are available on {normalized_date}: {top}. "
+                                        "Which time would you like?"
+                                    ), None, None
+                        return "What time would you like? For example '7pm' or '19:30'.", None, None
+                    
+                    # 5) Name then 6) Email
+                    if 'name' in missing_fields:
+                        return "What name should I put the booking under?", None, None
+                    if 'email' in missing_fields:
+                        return "What's the best email for your confirmation?", None, None
                 
                 # Normalize date first
                 normalized_date = self.intent_extractor.normalize_date_text(intent['date'])
@@ -858,7 +1080,7 @@ class BookingAgent:
                 
                 # Check availability first
                 # Get restaurant info
-                restaurant_name = intent.get('restaurant', RESTAURANT_NAME)
+                restaurant_name = booking_client.resolve_restaurant_identifier(intent.get('restaurant')) or intent.get('restaurant') or RESTAURANT_NAME
                 restaurant_info = booking_client.get_restaurant_info(restaurant_name)
                 
                 availability_check = await booking_client.check_availability(normalized_date, intent['party_size'], restaurant_name)
@@ -1124,7 +1346,7 @@ class BookingAgent:
                     return f"❌ I couldn't cancel booking {booking_ref}. Please check the reference number and try again.", None, None
             
             return "I understand you're interested in booking. How can I help you with your reservation?", None, None
-            
+        
         except Exception as e:
             return f"I apologize, but I encountered an issue processing your request: {str(e)}", None, None
     
@@ -1134,10 +1356,12 @@ class BookingAgent:
 
 CONVERSATION STYLE:
 - Be warm, natural, and engaging like a real restaurant host
+- MAINTAIN CONTEXT from the entire conversation - remember what was discussed earlier
 - Ask for information gradually and conversationally, not all at once
-- Acknowledge what the user has already provided
+- Acknowledge what the user has already provided and reference previous parts of conversation
 - Show enthusiasm about their dining plans
 - Use casual, friendly language while remaining professional
+- For long conversations, reference earlier topics and build on previous discussions
 
 AVAILABLE RESTAURANTS:
 - The Hungry Unicorn: Upscale modern European cuisine ($$$$)
@@ -1184,13 +1408,22 @@ BOOKING LOOKUP/MODIFICATION EXAMPLES:
 
 Remember: Help them choose the right restaurant first, then build the conversation naturally. Show genuine interest in matching them with the perfect dining experience. Always base recommendations on actual availability data. For booking changes, be understanding and helpful."""
     
-    async def process_message(self, message: str, session_data: dict = None) -> Tuple[str, Optional[dict], Optional[dict], dict]:
+    async def process_message(self, message: str, session_data: dict = None, conversation_history: list = None) -> Tuple[str, Optional[dict], Optional[dict], dict]:
         """Process a message through the LangGraph agent"""
         session_data = session_data or {}
+        conversation_history = conversation_history or []
         
-        # Prepare initial state
+        # Convert conversation history to LangChain messages
+        history_messages = []
+        for msg in conversation_history:
+            if msg.get("role") == "user":
+                history_messages.append(HumanMessage(content=msg["content"]))
+            elif msg.get("role") == "assistant":
+                history_messages.append(AIMessage(content=msg["content"]))
+        
+        # Prepare initial state with conversation history
         initial_state = AgentState(
-            messages=[HumanMessage(content=message)],
+            messages=history_messages,  # Include conversation history
             user_input=message,
             session_data=session_data,
             booking_intent=None,
@@ -1236,7 +1469,7 @@ async def health_check():
     """Health check endpoint"""
     try:
         # Test AI providers
-        openai_status = agent.openai_llm is not None
+        openai_status = False  # Using Ollama only
         ollama_status = False
         
         try:
@@ -1283,10 +1516,11 @@ async def chat_with_agent(request: ChatRequest):
         
         session = sessions[session_id]
         
-        # Process message through LangGraph agent
+        # Process message through LangGraph agent with conversation history
         response_message, booking_data, availability_data, updated_session = await get_agent().process_message(
             request.message,
-            session["session_data"]
+            session["session_data"],
+            session["conversation_history"]
         )
 
         # Persist updated session data
@@ -1296,9 +1530,19 @@ async def chat_with_agent(request: ChatRequest):
         session["conversation_history"].append({"role": "user", "content": request.message})
         session["conversation_history"].append({"role": "assistant", "content": response_message})
         
-        # Keep only last 10 messages to prevent memory issues
-        if len(session["conversation_history"]) > 10:
-            session["conversation_history"] = session["conversation_history"][-10:]
+        # Enhanced conversation history management for long conversations
+        # Keep up to 60 messages (30 conversation turns) with intelligent pruning
+        if len(session["conversation_history"]) > 60:
+            # For very long conversations, keep:
+            # - First 6 messages (3 turns) for early context
+            # - Last 50 messages (25 turns) for recent context
+            conversation = session["conversation_history"]
+            session["conversation_history"] = conversation[:6] + conversation[-50:]
+            
+            # Store summary of middle conversations if this is the first time pruning
+            if "conversation_summary" not in session:
+                middle_portion = conversation[6:-50]
+                session["conversation_summary"] = f"Earlier conversation covered {len(middle_portion)//2} topics including initial restaurant selection and preferences."
         
         # Generate contextual suggestions
         suggestions = generate_suggestions(request.message, response_message, booking_data, availability_data)
@@ -1316,7 +1560,8 @@ async def chat_with_agent(request: ChatRequest):
             },
             booking_data=booking_data,
             availability_data=availability_data,
-            ai_mode="ollama"
+            ai_mode="ollama",
+            intent=updated_session.get("last_intent") if isinstance(updated_session, dict) else None
         )
         
         print(f"🤖 LangGraph Chat - User: {request.message}")
@@ -1390,7 +1635,7 @@ async def graph_structure():
     """Get the LangGraph structure visualization - following official patterns"""
     try:
         # Get graph structure (following LangGraph documentation pattern)
-        graph_dict = agent.graph.get_graph().to_json()
+        graph_dict = get_agent().graph.get_graph().to_json()
         
         return {
             "framework": "LangGraph",

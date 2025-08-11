@@ -1,367 +1,194 @@
 # TableBooker AI Agent 🍽️
 
-A sophisticated conversational AI agent built with **LangGraph** and **Ollama** that provides complete restaurant booking management through natural language conversations.
+A production-ready conversational AI agent for restaurant booking management, built with **LangGraph** and **Ollama** to provide intelligent, context-aware booking services through natural language conversations.
 
-## 🌟 Overview
+## 📋 Overview
 
-TableBooker is a production-ready chat interface that seamlessly integrates with restaurant booking systems to provide customers with an intuitive way to:
+TableBooker is an enterprise-grade chat interface that transforms restaurant booking from a rigid form-based process into an intuitive, conversational experience. The system integrates with restaurant management APIs to provide real-time availability checking, intelligent booking creation, and comprehensive reservation management.
 
-- ✅ **Check availability** across multiple restaurants with real-time data
-- ✅ **Make reservations** with natural conversation flow
-- ✅ **View booking details** using booking references
-- ✅ **Modify reservations** (time, date, party size)
-- ✅ **Cancel bookings** with proper status handling
-- ✅ **Handle edge cases** like cancelled booking status
+It is designed to work seamlessly with an enhanced Mock Booking API server fork that includes multi-restaurant support for 4 venues — TheHungryUnicorn, PizzaPalace, SushiZen, and CafeBistro. See the forked repository here: [Nikitich2033/Restaurant-Booking-Mock-API-Server](https://github.com/Nikitich2033/Restaurant-Booking-Mock-API-Server).
 
-## 🚀 Key Features
+### **Core Capabilities**
+- **Multi-Restaurant Support**: Seamlessly manage bookings across multiple restaurant locations
+- **Natural Language Processing**: Understand and respond to conversational booking requests
+- **Real-Time Availability**: Database-driven availability checking with instant responses
+- **Complete CRUD Operations**: Create, read, update, and cancel reservations
+- **Context-Aware Conversations**: Maintain conversation state across multiple turns
+- **Edge Case Handling**: Intelligent management of cancelled bookings and policy questions
 
-### 🤖 **Advanced AI Architecture**
-- **LangGraph Framework**: State-driven conversation management
-- **Ollama Integration**: Local LLM processing (llama3.1:8b)
-- **Enhanced Intent Recognition**: Detects all booking operations with priority handling
-- **Smart Status Management**: Tracks and prevents operations on cancelled bookings
+## 🚀 Getting Started
 
-### 🏪 **Multi-Restaurant Support**
-- **4 Restaurants**: TheHungryUnicorn, PizzaPalace, SushiZen, CafeBistro
-- **Database-Driven**: Real availability data from SQLite database
-- **Cuisine-Based Selection**: Natural restaurant matching by cuisine preference
-- **Cross-Restaurant Search**: Automatic lookup across all restaurants
-
-### 💬 **Natural Conversation**
-- **Conversational Flow**: Gradual information gathering
-- **Context Awareness**: Remembers conversation history
-- **Rich Responses**: Formatted messages with emojis and structure
-- **Error Recovery**: Graceful handling of invalid inputs
-
-### 🔧 **Complete CRUD Operations**
-- **Create**: Full booking creation with availability validation
-- **Read**: Booking lookup by reference across all restaurants
-- **Update**: Modify time, date, party size with validation
-- **Delete**: Cancel bookings with reason tracking
-
-## 📊 User Stories - All Implemented ✅
-
-| User Story | Status | Example |
-|------------|--------|---------|
-| **Check Availability** | ✅ **COMPLETE** | *"Can you show me availability for this weekend?"* |
-| **Book Reservation** | ✅ **COMPLETE** | *"I'd like to book a table for 4 people next Friday at 7pm."* |
-| **Check Booking Details** | ✅ **COMPLETE** | *"What time is my reservation on Saturday?"* |
-| **Modify Reservation** | ✅ **COMPLETE** | *"I need to change my booking from 6pm to 8pm."* |
-| **Cancel Reservation** | ✅ **COMPLETE** | *"Please cancel my reservation for tomorrow."* |
-
-## 🏗️ Technical Architecture
-
-### **Core Stack**
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Frontend      │    │   AI Backend    │    │   Mock API      │
-│   React + TS    │◄──►│ LangGraph+Ollama│◄──►│ FastAPI+SQLite  │
-│   Port: 3000    │    │   Port: 8000    │    │   Port: 8547    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-```
-
-### **AI Framework Details**
-- **State Management**: TypedDict with add_messages reducer
-- **Graph Structure**: START → ollama_agent → booking_processor → END
-- **Intent Extraction**: Priority-based pattern matching (cancel > modify > lookup > availability > book)
-- **Booking Reference**: Advanced regex patterns for alphanumeric codes
-
-### **Database Integration**
-- **SQLAlchemy ORM**: Direct database queries for restaurant data
-- **Real-Time Availability**: Live slot checking from availability tables
-- **No Hardcoded Data**: All restaurant information from database
-- **Multi-Restaurant Support**: Seamless switching between restaurants
-
-## 📁 Project Structure
-
-```
-restaurant-booking-chat-agent/
-├── 📄 README.md                          # This file
-├── 🧪 user_stories_test.py               # Comprehensive test suite
-├── 📊 enhanced_test_script_summary.md    # Test documentation
-├── 🔧 backend/                           # AI Agent Backend
-│   ├── main.py                          # LangGraph + Ollama server
-│   ├── requirements.txt                 # Python dependencies
-│   └── README.md                        # Backend docs
-├── 🎨 frontend/                          # React Web Interface  
-│   ├── src/                             # React components
-│   ├── package.json                     # Node dependencies
-│   └── README.md                        # Frontend docs
-├── 🔧 install_ollama_model.bat          # Ollama setup
-├── 🚀 start_ollama_system.bat           # Quick start
-├── 📖 OLLAMA_SETUP.md                   # Setup guide
-├── ⚡ QUICK_SETUP.md                    # Quick start guide
-└── 🧪 test_ollama.py                    # Connectivity test
-```
-
-## 🚀 Quick Start
-
-### **1. Prerequisites**
-- Python 3.8+
-- Node.js 16+
-- Git
+### **Prerequisites**
+- Python 3.8+ with pip
+- Node.js 16+ with npm
 - Ollama installed locally
+- Git for repository access
 
-### **2. Start Restaurant API Server**
-> **Uses Enhanced Fork**: [Nikitich2033/Restaurant-Booking-Mock-API-Server](https://github.com/Nikitich2033/Restaurant-Booking-Mock-API-Server) with multi-restaurant support
+### **Installation Steps**
 
+1. **Clone the Repository**
    ```bash
-cd Restaurant-Booking-Mock-API-Server
-pip install -r requirements.txt
-python -m app
-# Server runs on http://localhost:8547 with 4 restaurants
-```
-
-### **3. Start AI Agent Backend**
-   ```bash
-cd restaurant-booking-chat-agent/backend
-   pip install -r requirements.txt
-python main.py
-# Server runs on http://localhost:8000
+   git clone https://github.com/your-username/restaurant-booking-chat-agent.git
+   cd restaurant-booking-chat-agent
    ```
 
-### **4. Start Frontend (Optional)**
+2. **Backend Setup**
    ```bash
-cd restaurant-booking-chat-agent/frontend
-npm install
-npm start
-# Frontend runs on http://localhost:3000
-```
+   cd backend
+   pip install -r requirements.txt
+   python main.py
+   ```
 
-### **5. Run Complete Test Suite**
+3. **Frontend Setup**
    ```bash
-cd restaurant-booking-chat-agent
-python user_stories_test.py
-```
+   cd frontend
+   npm install
+   npm run dev
+   ```
 
-## 🧪 Testing
+4. **Start Ollama Service**
+   ```bash
+   ollama serve
+   ollama pull llama3.1:8b
+   ```
 
-### **Comprehensive Test Suite**
-The project includes a complete test suite (`user_stories_test.py`) with:
+5. **Clone and Launch the Mock API Server (Enhanced fork — 4 restaurants)**
+   Repository: [Nikitich2033/Restaurant-Booking-Mock-API-Server](https://github.com/Nikitich2033/Restaurant-Booking-Mock-API-Server)
+   ```bash
+   # From your workspace root (or a sibling directory)
+   git clone https://github.com/Nikitich2033/Restaurant-Booking-Mock-API-Server.git
+   cd Restaurant-Booking-Mock-API-Server
+   pip install -r requirements.txt
+   python -m app.main
+   # Server runs on http://localhost:8547
+   ```
 
-#### **✅ Core User Stories (4 tests)**
-1. Check availability across multiple restaurants
-2. Create bookings with validation
-3. Lookup booking details by reference
-4. Modify and cancel reservations
-
-#### **🔍 Edge Cases - Cancelled Booking Status (5 tests)**
-1. Create test booking for cancellation
-2. Cancel the booking
-3. Check cancelled booking status → Shows "BOOKING CANCELLED"
-4. Try to modify cancelled booking → **Blocked** with explanation
-5. Try to cancel already cancelled → **Blocked** ("already cancelled")
-
-#### **⚠️ Invalid Operations (5 tests)**
-1. Check invalid booking reference
-2. Modify non-existent booking
-3. Cancel non-existent booking
-4. Incomplete booking requests
-5. Invalid date formats
-
-**Total: 15 comprehensive test scenarios**
-
-### **Run Tests**
-```bash
-# Run complete test suite
-python user_stories_test.py
-
-# Quick manual tests
+### **Quick Test**
+   ```bash
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "availability tomorrow 2 people", "session_id": "test1"}'
+  -d '{"message": "Hi, I need a table for 4 people tonight", "session_id": "test"}'
 ```
 
-## 📚 API Integration
+## 🏗️ Design Rationale
 
-### **TableBooker AI Endpoints**
-- `POST /chat` - Main chat interface
-- `GET /ai-status` - AI system health
-- `GET /restaurants` - Available restaurants
-- `GET /` - System information
+### **Framework & Technology Choices**
 
-### **Enhanced Mock Booking API (Port 8547)**
-> **Repository**: [Nikitich2033/Restaurant-Booking-Mock-API-Server](https://github.com/Nikitich2033/Restaurant-Booking-Mock-API-Server)
+#### **LangGraph Framework**
+- **Why LangGraph**: Chosen for its state-driven conversation management and production-ready architecture
+- **Benefits**: 
+  - Built-in state persistence and conversation flow control
+  - Native async support for high-performance API handling
+  - Graph-based workflow that's easy to debug and extend
+  - Enterprise-grade error handling and retry mechanisms
 
-- `POST /api/ConsumerApi/v1/Restaurant/{name}/AvailabilitySearch` - Check availability
-- `POST /api/ConsumerApi/v1/Restaurant/{name}/BookingWithStripeToken` - Create booking
-- `GET /api/ConsumerApi/v1/Restaurant/{name}/Booking/{ref}` - Get booking details ✨ **Enhanced**
-- `PATCH /api/ConsumerApi/v1/Restaurant/{name}/Booking/{ref}` - Update booking ✨ **Enhanced**
-- `POST /api/ConsumerApi/v1/Restaurant/{name}/Booking/{ref}/Cancel` - Cancel booking ✨ **Enhanced**
+#### **Ollama Integration**
+- **Why Ollama**: Selected for local LLM processing to ensure data privacy and reduce latency
+- **Benefits**:
+  - No external API dependencies or rate limits
+  - Complete data sovereignty for sensitive booking information
+  - Cost-effective for production deployments
+  - Customizable model selection (llama3.1:8b for optimal performance)
 
-**✨ Recent Enhancements:**
-- ✅ **Multi-Restaurant Support**: 4 restaurants with varied cuisines
-- ✅ **Enhanced Status Handling**: Cancelled booking prevention logic
-- ✅ **Comprehensive Edge Cases**: 15 test scenarios including error handling
-- ✅ **Database-Driven Data**: No hardcoded restaurant information
-- ✅ **Booking Reference Extraction**: Advanced alphanumeric pattern recognition
+#### **FastAPI Backend**
+- **Why FastAPI**: Chosen for its high performance and automatic API documentation
+- **Benefits**:
+  - Async-first architecture for concurrent booking requests
+  - Automatic OpenAPI/Swagger documentation
+  - Built-in validation and error handling
+  - Excellent performance for real-time chat applications
 
-## 🎯 Usage Examples
+### **Design Decisions & Trade-offs**
 
-### **Check Availability**
-```json
-POST /chat
-{
-  "message": "availability tomorrow 4 people",
-  "session_id": "user123"
-}
+#### **State Management Strategy**
+- **Decision**: Implemented TypedDict with add_messages reducer for conversation state
+- **Trade-off**: More complex initial setup vs. robust conversation tracking
+- **Rationale**: Long conversations require sophisticated state management that simple session storage cannot provide
 
-Response: Shows 4 restaurants with time slots
-```
+#### **Intent Extraction Approach**
+- **Decision**: Priority-based regex pattern matching over ML-based classification
+- **Trade-off**: Less flexible than ML but more predictable and faster
+- **Rationale**: Booking intents are well-defined and pattern-based, making regex more reliable for production use
 
-### **Book Restaurant**
-```json
-POST /chat
-{
-  "message": "book Pizza Palace tomorrow 7pm 2 people John Smith john@example.com",
-  "session_id": "user123" 
-}
+#### **Database Integration Method**
+- **Decision**: Direct SQLAlchemy queries over API abstraction layers
+- **Trade-off**: Tighter coupling vs. better performance and real-time data access
+- **Rationale**: Restaurant availability requires real-time data that abstraction layers can delay
 
-Response: "🎉 RESERVATION CONFIRMED! Reference: ABC1234"
-```
+### **Scalability Architecture**
 
-### **Check Booking Status**
-```json
-POST /chat
-{
-  "message": "check my booking reference ABC1234",
-  "session_id": "user123"
-}
+#### **Horizontal Scaling**
+- **Stateless Design**: Each request is independent, allowing multiple server instances
+- **Load Balancing**: FastAPI supports multiple worker processes with uvicorn
+- **Database Scaling**: SQLite can be replaced with PostgreSQL/MySQL for high-volume deployments
 
-Response: Complete booking details or cancelled status
-```
+#### **Performance Optimizations**
+- **Connection Pooling**: HTTPX client maintains connection pools for external API calls
+- **Async Processing**: Non-blocking I/O for concurrent booking operations
+- **Context Window Management**: Intelligent conversation pruning for long sessions
 
-### **Modify Booking**
-```json
-POST /chat
-{
-  "message": "change my booking ABC1234 to 8pm",
-  "session_id": "user123"
-}
+#### **Production Deployment**
+- **Containerization**: Docker support for consistent deployment environments
+- **Environment Configuration**: Configurable settings for different deployment stages
+- **Health Monitoring**: Built-in health check endpoints for load balancer integration
 
-Response: "✅ BOOKING UPDATED! New Time: 8pm"
-```
+### **Identified Limitations & Improvements**
 
-## 🎨 Status Handling
+#### **Current Limitations**
+1. **Single LLM Provider**: Only Ollama support limits deployment flexibility
+2. **Local Model Dependency**: Requires local Ollama installation
+3. **Fixed Context Window**: Maximum 60-message conversation history
+4. **Limited Multi-language Support**: English-only conversation handling
 
-### **Booking Statuses**
-- **✅ Confirmed**: Active booking, can be modified/cancelled
-- **🔄 Updated**: Modified booking, can be further modified/cancelled  
-- **❌ Cancelled**: Cancelled booking, **cannot be modified** (prevention logic)
+#### **Planned Improvements**
+1. **Multi-LLM Support**: Add OpenAI, Anthropic, and other providers
+2. **Cloud Deployment**: Container orchestration with Kubernetes
+3. **Advanced Analytics**: Booking pattern analysis and optimization
+4. **Multi-language Support**: Internationalization for global deployments
+5. **Real-time Notifications**: WebSocket support for live updates
 
-### **Cancelled Booking Response**
-```
-❌ **BOOKING CANCELLED**
+### **Security Considerations & Implementation**
 
-🎫 Reference: ABC1234
-🍽️ Restaurant: Pizza Palace
-📅 Original Date: 2025-08-11
-🕐 Original Time: 19:00:00
-👥 Party Size: 2 people
-❌ Status: CANCELLED
-📝 Reason: Customer Request
+#### **Data Protection**
+- **Input Validation**: Comprehensive validation of all user inputs
+- **SQL Injection Prevention**: Parameterized queries with SQLAlchemy
+- **XSS Protection**: Content sanitization in chat responses
+- **Rate Limiting**: Built-in request throttling to prevent abuse
 
-💔 This booking has already been cancelled. 
-If you'd like to make a new reservation, I'd be happy to help!
-```
+#### **Authentication & Authorization**
+- **Session Management**: Secure session handling with unique session IDs
+- **API Security**: CORS configuration for controlled cross-origin access
+- **Input Sanitization**: Regex pattern validation for booking references
 
-## 🏪 Available Restaurants
+#### **Production Security**
+- **HTTPS Enforcement**: TLS/SSL encryption for all communications
+- **Environment Variables**: Secure configuration management
+- **Audit Logging**: Comprehensive logging of all booking operations
 
-| Restaurant | Cuisine | Price Range | Specialties |
-|------------|---------|-------------|-------------|
-| **The Hungry Unicorn** | European | $$$$ | Upscale modern European cuisine |
-| **Pizza Palace** | Italian | $$$ | Authentic Italian pizzas and pasta |
-| **Sushi Zen** | Japanese | $$$$ | Fresh sushi and Japanese cuisine |
-| **Cafe Bistro** | French | $$ | Casual French bistro with daily specials |
+## 📊 Technical Specifications
 
-## 🛠️ Development
+### **System Requirements**
+- **Backend**: Python 3.8+
+- **Frontend**: Modern browser with ES6+ support
+- **Database**: SQLite (dev) / PostgreSQL (prod)
+- **LLM**: Ollama with llama3.1:8b model
 
-### **Key Implementation Files**
-- `backend/main.py` - Main LangGraph agent with Ollama integration
-- `user_stories_test.py` - Complete test suite with edge cases
-- `frontend/src/App.tsx` - React chat interface
 
-### **Adding New Features**
-1. Update intent extraction patterns in `extract_booking_intent()`
-2. Add new actions to `_process_booking_action()`
-3. Update system prompts in `_get_system_prompt()`
-4. Add test cases to `user_stories_test.py`
+### **API Endpoints**
+- `POST /chat` - Main conversation endpoint
+- `GET /health` - System health check
+- `GET /graph-structure` - LangGraph workflow visualization
+- `GET /` - Service information
 
-### **Code Quality**
-- Type hints throughout codebase
-- Comprehensive error handling
-- Rich logging and debugging
-- Modular architecture
+## 🔗 Repository Information
 
-## 🔮 Roadmap
+- **Source Code**: [GitHub Repository](https://github.com/your-username/restaurant-booking-chat-agent)
+- **Mock API Server (Enhanced fork — 4 restaurants)**: [Nikitich2033/Restaurant-Booking-Mock-API-Server](https://github.com/Nikitich2033/Restaurant-Booking-Mock-API-Server)
+- **Documentation**: Comprehensive setup guides and API documentation
+- **Testing**: Automated test suites for all user stories and edge cases
 
-### **Completed ✅**
-- ✅ **LangGraph + Ollama integration** (llama3.1:8b model)
-- ✅ **Multi-restaurant support** (4 restaurants with diverse cuisines)
-- ✅ **Complete CRUD operations** (Create, Read, Update, Delete bookings)
-- ✅ **Enhanced status handling** (cancelled booking prevention logic)
-- ✅ **Edge case prevention logic** (blocks invalid operations)
-- ✅ **Comprehensive test suite** (15 test scenarios with edge cases)
-- ✅ **Database-driven availability** (real-time data from SQLite)
-- ✅ **Natural conversation flow** (gradual information gathering)
-- ✅ **Enhanced API fork** (multi-restaurant mock server)
-- ✅ **Advanced intent recognition** (priority-based pattern matching)
-- ✅ **Booking reference extraction** (alphanumeric code recognition)
-- ✅ **Production-ready documentation** (complete setup guides)
-
-### **Future Enhancements 🚀**
-- 🔄 User authentication system
-- 🔄 Email confirmation notifications
-- 🔄 Voice interface integration
-- 🔄 Mobile app development
-- 🔄 Analytics dashboard
-- 🔄 Multi-language support
-
-## 📈 Performance
-
-- **Response Time**: < 2 seconds for availability checks
-- **Booking Creation**: < 3 seconds end-to-end
-- **Database Queries**: Optimized with SQLAlchemy ORM
-- **LLM Processing**: Local Ollama for privacy and speed
-- **Concurrent Users**: Supports multiple simultaneous sessions
-
-## 🔒 Security
-
-- ✅ Bearer token authentication
-- ✅ Input validation and sanitization
-- ✅ No sensitive data storage
-- ✅ Local LLM processing (privacy-focused)
-- ✅ SQL injection prevention
-- ✅ Rate limiting considerations
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open Pull Request
-
-## 📞 Support
-
-- 📧 **Issues**: GitHub Issues tab
-- 📖 **Documentation**: README files in each directory
-- 🧪 **Testing**: Run `python user_stories_test.py`
-- 💬 **Community**: Discussions tab
-
----
-
-## 🎉 **Status: Production Ready!**
-
-**Version**: 2.1.0  
-**Last Updated**: August 2025  
-**AI Framework**: LangGraph + Ollama (llama3.1:8b)  
-**API Backend**: [Enhanced Fork](https://github.com/Nikitich2033/Restaurant-Booking-Mock-API-Server) with 4 restaurants  
-**Test Coverage**: 15 comprehensive scenarios including edge cases  
-**User Stories**: All 5 implemented with complete status handling  
-
-**🚀 Ready for deployment with complete booking lifecycle management and enhanced multi-restaurant support!**
