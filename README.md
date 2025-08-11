@@ -59,7 +59,7 @@ It is designed to work seamlessly with an enhanced Mock Booking API server fork 
    git clone https://github.com/Nikitich2033/Restaurant-Booking-Mock-API-Server.git
    cd Restaurant-Booking-Mock-API-Server
    pip install -r requirements.txt
-   python -m app.main
+   python -m app
    # Server runs on http://localhost:8547
    ```
 
@@ -70,100 +70,95 @@ curl -X POST http://localhost:8000/chat \
   -d '{"message": "Hi, I need a table for 4 people tonight", "session_id": "test"}'
 ```
 
-## 🏗️ Design Rationale
+## 🏗️ Design Rationale (Concise)
 
-### **Framework & Technology Choices**
+### Why these technologies
+- **FastAPI (backend)**: Async-first, type hints, and OpenAPI docs out of the box. Great perf for chat-style APIs and easy to scale horizontally.
+- **LangGraph (agent runtime)**: Deterministic, stateful conversation flow with explicit nodes/edges. Makes long-running, multi-turn interactions testable and debuggable.
+- **Ollama + llama3.1:8b (LLM)**: Local inference keeps data private and eliminates API costs/rate limits. 8B strikes a balance between quality and speed for booking intents. Chosen for cost-effectiveness.
+- **SQLite + SQLAlchemy (data)**: Zero-ops local DB during development; can migrate to PostgreSQL/MySQL in production with minimal code changes.
+- **React + Vite (frontend)**: Fast DX and a simple, modern chat UI. Card rendering is driven by structured `booking_data` from the API.
 
-#### **LangGraph Framework**
-- **Why LangGraph**: Chosen for its state-driven conversation management and production-ready architecture
-- **Benefits**: 
-  - Built-in state persistence and conversation flow control
-  - Native async support for high-performance API handling
-  - Graph-based workflow that's easy to debug and extend
-  - Enterprise-grade error handling and retry mechanisms
+## 🔌 API Integration
 
-#### **Ollama Integration**
-- **Why Ollama**: Selected for local LLM processing to ensure data privacy and reduce latency
-- **Benefits**:
-  - No external API dependencies or rate limits
-  - Complete data sovereignty for sensitive booking information
-  - Cost-effective for production deployments
-  - Customizable model selection (llama3.1:8b for optimal performance)
+- **Base URL**: `http://localhost:8547`
+- **Auth**: All endpoints require Bearer token authentication via `Authorization: Bearer <token>`
+- **Content-Type**: `application/x-www-form-urlencoded` for POST/PATCH bodies
+- **Default restaurant microsite**: `TheHungryUnicorn` (others: `PizzaPalace`, `SushiZen`, `CafeBistro`)
 
-#### **FastAPI Backend**
-- **Why FastAPI**: Chosen for its high performance and automatic API documentation
-- **Benefits**:
-  - Async-first architecture for concurrent booking requests
-  - Automatic OpenAPI/Swagger documentation
-  - Built-in validation and error handling
-  - Excellent performance for real-time chat applications
+### Endpoints used by the agent
+- Check availability
+  - `POST /api/ConsumerApi/v1/Restaurant/{restaurant_name}/AvailabilitySearch`
+  - Body: `VisitDate=YYYY-MM-DD&PartySize=NN&ChannelCode=ONLINE`
+- Create booking
+  - `POST /api/ConsumerApi/v1/Restaurant/{restaurant_name}/BookingWithStripeToken`
+  - Body: `VisitDate`, `VisitTime=HH:MM:SS`, `PartySize`, `ChannelCode=ONLINE`, plus optional `Customer[FirstName]`, `Customer[Surname]`, `Customer[Email]`, `Customer[Mobile]`, `SpecialRequests`
+- Get booking
+  - `GET /api/ConsumerApi/v1/Restaurant/{restaurant_name}/Booking/{booking_reference}`
+- Update booking
+  - `PATCH /api/ConsumerApi/v1/Restaurant/{restaurant_name}/Booking/{booking_reference}`
+  - Body: any of `VisitDate`, `VisitTime`, `PartySize`, `SpecialRequests`
+- Cancel booking
+  - `POST /api/ConsumerApi/v1/Restaurant/{restaurant_name}/Booking/{booking_reference}/Cancel`
+  - Body: `micrositeName`, `bookingReference`, `cancellationReasonId`
 
-### **Design Decisions & Trade-offs**
+### Example headers
+```
+Authorization: Bearer <mock_or_real_token>
+Content-Type: application/x-www-form-urlencoded
+```
 
-#### **State Management Strategy**
-- **Decision**: Implemented TypedDict with add_messages reducer for conversation state
-- **Trade-off**: More complex initial setup vs. robust conversation tracking
-- **Rationale**: Long conversations require sophisticated state management that simple session storage cannot provide
+### Minimal examples
+```bash
+# Availability
+curl -X POST "http://localhost:8547/api/ConsumerApi/v1/Restaurant/TheHungryUnicorn/AvailabilitySearch" \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "VisitDate=2025-08-12&PartySize=2&ChannelCode=ONLINE"
 
-#### **Intent Extraction Approach**
-- **Decision**: Priority-based regex pattern matching over ML-based classification
-- **Trade-off**: Less flexible than ML but more predictable and faster
-- **Rationale**: Booking intents are well-defined and pattern-based, making regex more reliable for production use
+# Create booking
+curl -X POST "http://localhost:8547/api/ConsumerApi/v1/Restaurant/TheHungryUnicorn/BookingWithStripeToken" \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "VisitDate=2025-08-12&VisitTime=19:00:00&PartySize=2&ChannelCode=ONLINE&Customer[FirstName]=John&Customer[Surname]=Smith&Customer[Email]=john@example.com"
+```
 
-#### **Database Integration Method**
-- **Decision**: Direct SQLAlchemy queries over API abstraction layers
-- **Trade-off**: Tighter coupling vs. better performance and real-time data access
-- **Rationale**: Restaurant availability requires real-time data that abstraction layers can delay
+## 🗺️ Architecture (visual)
 
-### **Scalability Architecture**
+```mermaid
+flowchart LR
+  user((User)) --> fe["Frontend (React + Vite)"]
+  fe --> be["Backend (FastAPI + LangGraph)"]
+  be --> llm["Ollama (llama3.1:8b)"]
+  be --> api["Booking Mock API (FastAPI)\nhttp://localhost:8547"]
+  api --> db[("SQLite DB\nrestaurant_booking.db")]
+  be --> session["Session State\n(conversation + booking)"]
 
-#### **Horizontal Scaling**
-- **Stateless Design**: Each request is independent, allowing multiple server instances
-- **Load Balancing**: FastAPI supports multiple worker processes with uvicorn
-- **Database Scaling**: SQLite can be replaced with PostgreSQL/MySQL for high-volume deployments
+  classDef svc fill:#e6f3ff,stroke:#6aa5ff,color:#003366
+  classDef db fill:#fff6e6,stroke:#f0a500,color:#5a3d00
+  class fe,be,api,llm svc
+  class db db
+```
 
-#### **Performance Optimizations**
-- **Connection Pooling**: HTTPX client maintains connection pools for external API calls
-- **Async Processing**: Non-blocking I/O for concurrent booking operations
-- **Context Window Management**: Intelligent conversation pruning for long sessions
+### Decisions and trade‑offs
+- **Intent extraction**: Primary LLM parsing with a deterministic fallback for robustness. Trade‑off: Slight complexity vs. better resilience to odd phrasing.
+- **Direct API calls to booking server**: Tighter coupling but real‑time, truthful availability and immediate CRUD operations.
+- **Conversation memory**: Sliding window with pruning (up to ~60 messages). Keeps context while controlling token usage and latency.
+- **Concurrency**: Availability checks across restaurants run in parallel to reduce perceived latency at the expense of short bursts of downstream calls.
 
-#### **Production Deployment**
-- **Containerization**: Docker support for consistent deployment environments
-- **Environment Configuration**: Configurable settings for different deployment stages
-- **Health Monitoring**: Built-in health check endpoints for load balancer integration
+### Scaling to production
+- **Stateless app** behind a reverse proxy; scale API workers horizontally.
+- **LLM workers**: Run multiple Ollama instances or a GPU pool; route sessions or queue requests for backpressure.
+- **Data layer**: Move from SQLite to PostgreSQL; add read replicas and caching of availability (short TTL) per restaurant/date/party.
+- **Observability**: Structured logs, tracing, metrics; error budgets for LLM latency/timeouts.
 
-### **Identified Limitations & Improvements**
+### Known limitations and improvements
+- **Hardware constraint (dev)**: Built and tested on a laptop with ~8 GB VRAM running `llama3.1:8b` unquantized. This pushed VRAM to the limit, so context windows were kept conservative and latency/concurrency were constrained. On similar hardware, consider smaller models or quantized variants for headroom; larger VRAM meaningfully improves UX.
+- **Time constraints**: Not every edge case is fully explored (e.g., complex modification chains, double‑booking race conditions, DST/time‑zone conversions, rare phrasing). Next steps: idempotency keys, stricter validation, fuller E2E test coverage, fuzzing of natural language inputs.
+- **Single LLM provider**: Add hybrid routing to cloud APIs for bursts or fallback.
+- **Internationalization**: English‑only for now.
 
-#### **Current Limitations**
-1. **Single LLM Provider**: Only Ollama support limits deployment flexibility
-2. **Local Model Dependency**: Requires local Ollama installation
-3. **Fixed Context Window**: Maximum 60-message conversation history
-4. **Limited Multi-language Support**: English-only conversation handling
-
-#### **Planned Improvements**
-1. **Multi-LLM Support**: Add OpenAI, Anthropic, and other providers
-2. **Cloud Deployment**: Container orchestration with Kubernetes
-3. **Advanced Analytics**: Booking pattern analysis and optimization
-4. **Multi-language Support**: Internationalization for global deployments
-5. **Real-time Notifications**: WebSocket support for live updates
-
-### **Security Considerations & Implementation**
-
-#### **Data Protection**
-- **Input Validation**: Comprehensive validation of all user inputs
-- **SQL Injection Prevention**: Parameterized queries with SQLAlchemy
-- **XSS Protection**: Content sanitization in chat responses
-- **Rate Limiting**: Built-in request throttling to prevent abuse
-
-#### **Authentication & Authorization**
-- **Session Management**: Secure session handling with unique session IDs
-- **API Security**: CORS configuration for controlled cross-origin access
-- **Input Sanitization**: Regex pattern validation for booking references
-
-#### **Production Security**
-- **HTTPS Enforcement**: TLS/SSL encryption for all communications
-- **Environment Variables**: Secure configuration management
-- **Audit Logging**: Comprehensive logging of all booking operations
+### Security and cost considerations
+- **Security**: Parameterized queries, input validation, limited CORS, session handling, and PII‑aware logging. Use HTTPS, environment‑based secrets, and least‑privilege DB/API creds in production.
+- **Cost**: Local Ollama avoids per‑token charges and rate limits during development and demos. In production, a hybrid approach (local for routine tasks, cloud for spikes/complex tasks) can optimize TCO.
 
 ## 📊 Technical Specifications
 
@@ -172,6 +167,7 @@ curl -X POST http://localhost:8000/chat \
 - **Frontend**: Modern browser with ES6+ support
 - **Database**: SQLite (dev) / PostgreSQL (prod)
 - **LLM**: Ollama with llama3.1:8b model
+- **GPU for Local Dev**: With ~8 GB VRAM, running `llama3.1:8b` unquantized is feasible but tight; reduce context and parallelism to avoid OOM. Quantized variants (optional) or smaller models increase headroom; more VRAM improves latency and max context.
 
 
 ### **API Endpoints**
@@ -186,6 +182,22 @@ curl -X POST http://localhost:8000/chat \
 - **Mock API Server (Enhanced fork — 4 restaurants)**: [Nikitich2033/Restaurant-Booking-Mock-API-Server](https://github.com/Nikitich2033/Restaurant-Booking-Mock-API-Server)
 - **Documentation**: Comprehensive setup guides and API documentation
 - **Testing**: Automated test suites for all user stories and edge cases
+
+## 🧪 Running Test Scripts
+
+Prerequisites:
+- Mock API server running at `http://localhost:8547` (`python -m app` in the mock repo)
+- Backend running at `http://localhost:8000` (`python main.py in `backend/`)
+- Ollama launched (ollama serve)
+
+From the project root `restaurant-booking-chat-agent/`:
+
+- User stories end-to-end flow (availability → booking → check → modify → cancel):
+  ```bash
+  python user_stories_test.py
+  # Optional: save full output to a file
+  python user_stories_test.py > user_stories_run.txt 2>&1
+  ```
 
 
 ## 📄 License
