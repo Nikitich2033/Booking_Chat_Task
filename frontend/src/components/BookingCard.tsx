@@ -6,6 +6,10 @@ interface BookingCardProps {
     table?: string
     duration?: string
     reference?: string
+    name?: string
+    email?: string
+    phone?: string
+    restaurant?: string
   }
 }
 
@@ -17,6 +21,12 @@ const BookingCard = ({ booking }: BookingCardProps) => {
       </div>
       
       <div className="booking-details">
+        {booking.restaurant && (
+          <div className="booking-row">
+            <span className="booking-label">🍽️ Restaurant:</span>
+            <span className="booking-value">{booking.restaurant}</span>
+          </div>
+        )}
         <div className="booking-row">
           <span className="booking-label">📅 Date:</span>
           <span className="booking-value">{booking.date}</span>
@@ -31,6 +41,24 @@ const BookingCard = ({ booking }: BookingCardProps) => {
           <span className="booking-label">👥 Party Size:</span>
           <span className="booking-value">{booking.party} {booking.party === 1 ? 'guest' : 'guests'}</span>
         </div>
+        {booking.name && (
+          <div className="booking-row">
+            <span className="booking-label">👤 Customer:</span>
+            <span className="booking-value">{booking.name}</span>
+          </div>
+        )}
+        {booking.email && (
+          <div className="booking-row">
+            <span className="booking-label">📧 Email:</span>
+            <span className="booking-value">{booking.email}</span>
+          </div>
+        )}
+        {booking.phone && (
+          <div className="booking-row">
+            <span className="booking-label">📱 Phone:</span>
+            <span className="booking-value">{booking.phone}</span>
+          </div>
+        )}
         
         {booking.table && (
           <div className="booking-row">
@@ -54,10 +82,7 @@ const BookingCard = ({ booking }: BookingCardProps) => {
         )}
       </div>
       
-      <div className="booking-actions">
-        <button className="action-btn primary">Confirm Booking</button>
-        <button className="action-btn secondary">Modify</button>
-      </div>
+      {/* actions removed for demo card-only display */}
     </div>
   )
 }

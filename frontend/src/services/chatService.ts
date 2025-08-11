@@ -38,6 +38,7 @@ interface AgentChatResponse {
   suggestions?: string[]
   booking_data?: any
   availability_data?: any
+  intent?: Record<string, any>
 }
 
 export class ChatService {
@@ -83,12 +84,13 @@ export class ChatService {
       const agentResponse = await this.callAgentAPI(userMessage)
       
       // Create bot response from agent
+      const confirmedBooking = this.extractBookingData(agentResponse)
       const botResponse: ChatMessage = {
         id: (Date.now() + 1).toString(),
         type: 'bot',
         content: agentResponse.message,
         timestamp: new Date(),
-        bookingData: this.extractBookingData(agentResponse),
+        bookingData: confirmedBooking,
         availabilityData: this.extractAvailabilityData(agentResponse)
       }
       
@@ -150,21 +152,28 @@ export class ChatService {
   }
 
   private extractBookingData(agentResponse: AgentChatResponse): any {
-    // Handle direct booking data from Ollama backend
-    if (agentResponse.booking_data) {
-      return agentResponse.booking_data
+    // Only show card for freshly confirmed bookings triggered by a 'book' action
+    const action = agentResponse.intent?.action?.toLowerCase?.()
+    const bd = agentResponse.booking_data
+    const status = typeof bd?.status === 'string' ? bd.status.toLowerCase() : undefined
+    if (action === 'book' && status === 'confirmed') {
+      return bd
     }
-    
-    // Handle both full AI response and simple response formats (legacy)
+
+    // Legacy/agent_responses format: still only if action is 'book' and confirmed
     if (agentResponse.agent_responses && Array.isArray(agentResponse.agent_responses)) {
-      // Full AI agent response format
-      for (const response of agentResponse.agent_responses) {
-        if (response.booking_data) {
-          return response.booking_data
+      if (action === 'book') {
+        for (const response of agentResponse.agent_responses) {
+          const rbd = response.booking_data
+          const rstatus = typeof rbd?.status === 'string' ? rbd.status.toLowerCase() : undefined
+          if (rbd && rstatus === 'confirmed') {
+            return rbd
+          }
         }
       }
     }
-    // Simple response format - no booking data extraction needed
+
+    // For lookup, update, cancel or any non-confirmed status, don't show a card
     return null
   }
 

@@ -165,26 +165,30 @@ class BookingAPIClient:
             db.close()
     
     async def get_restaurants_with_availability(self, date: str, party_size: int) -> dict:
-        """Get only restaurants that have availability for the given date and party size"""
+        """Get only restaurants that have availability for the given date and party size.
+        Runs availability checks concurrently for speed."""
         all_restaurants = self.get_available_restaurants()
-        available_restaurants = {}
-        
-        for restaurant_id, restaurant_info in all_restaurants.items():
+
+        async def check_one(rid: str, info: dict):
             try:
-                availability = await self.check_availability(date, party_size, restaurant_id)
-                if 'error' not in availability:
-                    available_slots = availability.get('available_slots', [])
-                    # Only include restaurants that have at least one available time slot
-                    available_times = [slot for slot in available_slots if slot.get('available', False)]
-                    if available_times:
-                        restaurant_info['available_times'] = available_times
-                        restaurant_info['total_available_slots'] = len(available_times)
-                        available_restaurants[restaurant_id] = restaurant_info
+                availability = await self.check_availability(date, party_size, rid)
+                if 'error' in availability:
+                    return rid, None
+                slots = availability.get('available_slots', [])
+                times = [slot for slot in slots if slot.get('available', False)]
+                if not times:
+                    return rid, None
+                enriched = dict(info)
+                enriched['available_times'] = times
+                enriched['total_available_slots'] = len(times)
+                return rid, enriched
             except Exception as e:
-                print(f"Error checking availability for {restaurant_id}: {e}")
-                continue
-                
-        return available_restaurants
+                print(f"Error checking availability for {rid}: {e}")
+                return rid, None
+
+        tasks = [check_one(rid, info) for rid, info in all_restaurants.items()]
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+        return {rid: info for rid, info in results if info}
     
     def get_restaurant_info(self, restaurant_id: str) -> dict:
         """Get information about a specific restaurant from database"""
@@ -882,7 +886,7 @@ class BookingAgent:
                 print(f"📋 Processing direct action: {intent.get('action')}")
                 # Process direct booking action
                 response, booking_data, availability_data = await self._process_booking_action(
-                    intent, updated_session
+                    intent, updated_session, state["user_input"]
                 )
                 
                 # Add booking results to state updates
@@ -924,7 +928,7 @@ class BookingAgent:
         
         return len(missing_fields) > 0 or is_conversational
     
-    async def _process_booking_action(self, intent: dict, session_data: dict) -> Tuple[str, Optional[dict], Optional[dict]]:
+    async def _process_booking_action(self, intent: dict, session_data: dict, current_user_input: str = "") -> Tuple[str, Optional[dict], Optional[dict]]:
         """Process booking actions and return response with booking/availability data"""
         try:
             if intent.get('action') == 'check_availability':
@@ -940,7 +944,7 @@ class BookingAgent:
                         return "To check availability, could you share the date and how many people?", None, None
                     if 'party size' in missing:
                         # If user just sent a bare number like "3", capture it to session and proceed
-                        m = re.search(r"\b(\d{1,2})\b", state["user_input"]) 
+                        m = re.search(r"\b(\d{1,2})\b", current_user_input) 
                         if m:
                             try:
                                 session_data["booking_info"]["party_size"] = int(m.group(1))
@@ -1016,7 +1020,7 @@ class BookingAgent:
                 
                 # Progressive information gathering: ask one clear next question instead of listing all
                 if missing_fields:
-                    user_text = state["user_input"].lower()
+                    user_text = current_user_input.lower()
                     # 1) Restaurant selection first
                     if 'restaurant' in missing_fields:
                         try:
@@ -1114,7 +1118,10 @@ class BookingAgent:
                             'party': intent['party_size'],
                             'reference': booking_ref,
                             'status': booking_result.get('status', 'confirmed'),
-                            'restaurant': 'TheHungryUnicorn',
+                            'restaurant': restaurant_name,
+                            'name': intent.get('name'),
+                            'email': intent.get('email'),
+                            'phone': intent.get('phone'),
                             'verified': True
                         }
                         
@@ -1162,7 +1169,9 @@ class BookingAgent:
                         'party': booking_found.get('party_size'),
                         'status': booking_found.get('status'),
                         'restaurant': found_restaurant,
-                        'customer_name': f"{customer.get('first_name', '')} {customer.get('surname', '')}".strip()
+                        'name': f"{customer.get('first_name', '')} {customer.get('surname', '')}".strip(),
+                        'email': customer.get('email'),
+                        'phone': customer.get('mobile') or customer.get('phone')
                     }
                     
                     # Check booking status and customize response accordingly

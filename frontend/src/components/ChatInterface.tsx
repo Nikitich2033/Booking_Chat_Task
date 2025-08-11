@@ -88,17 +88,22 @@ const ChatInterface = () => {
       <div className="messages-container">
         {messages.map((message) => (
           <div key={message.id}>
-            <div className={`message ${message.type}`}>
-              <div className="message-content">
-                {message.content}
-              </div>
-              <div className="message-time">
-                {message.timestamp.toLocaleTimeString()}
-              </div>
-            </div>
-            {message.bookingData && (
+            {message.bookingData ? (
+              // Show the booking confirmation card as the bot's message instead of text
               <div className="booking-card-container">
                 <BookingCard booking={message.bookingData} />
+                <div className="message-time">
+                  {message.timestamp.toLocaleTimeString()}
+                </div>
+              </div>
+            ) : (
+              <div className={`message ${message.type}`}>
+                <div className="message-content">
+                  {message.content}
+                </div>
+                <div className="message-time">
+                  {message.timestamp.toLocaleTimeString()}
+                </div>
               </div>
             )}
           </div>
