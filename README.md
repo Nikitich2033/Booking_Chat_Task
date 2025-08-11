@@ -1,5 +1,7 @@
 # TableBooker AI Agent 🍽️
 
+Demo video: [https://youtu.be/LleTaPnVNAQ?si=ON14HOMO8hvU5xeg](https://youtu.be/LleTaPnVNAQ?si=ON14HOMO8hvU5xeg)
+
 A production-ready conversational AI agent for restaurant booking management, built with **LangGraph** and **Ollama** to provide intelligent, context-aware booking services through natural language conversations.
 
 ## 📋 Overview
