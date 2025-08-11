@@ -103,12 +103,14 @@ curl -X POST http://localhost:8000/chat \
   - Body: `micrositeName`, `bookingReference`, `cancellationReasonId`
 
 ### Example headers
+
 ```
 Authorization: Bearer <mock_or_real_token>
 Content-Type: application/x-www-form-urlencoded
 ```
 
 ### Minimal examples
+
 ```bash
 # Availability
 curl -X POST "http://localhost:8547/api/ConsumerApi/v1/Restaurant/TheHungryUnicorn/AvailabilitySearch" \
@@ -125,12 +127,12 @@ curl -X POST "http://localhost:8547/api/ConsumerApi/v1/Restaurant/TheHungryUnico
 
 ```mermaid
 flowchart LR
-  user((User)) --> fe["Frontend (React + Vite)"]
+  user(("User")) --> fe["Frontend (React + Vite)"]
   fe --> be["Backend (FastAPI + LangGraph)"]
   be --> llm["Ollama (llama3.1:8b)"]
-  be --> api["Booking Mock API (FastAPI)\nhttp://localhost:8547"]
-  api --> db[("SQLite DB\nrestaurant_booking.db")]
-  be --> session["Session State\n(conversation + booking)"]
+  be --> api["Booking Mock API (FastAPI)<br/>localhost:8547"]
+  api --> db[("SQLite DB<br/>restaurant_booking.db")]
+  be --> session["Session State<br/>conversation + booking"]
 
   classDef svc fill:#e6f3ff,stroke:#6aa5ff,color:#003366
   classDef db fill:#fff6e6,stroke:#f0a500,color:#5a3d00
